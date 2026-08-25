@@ -1,6 +1,8 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using MySql.Data.MySqlClient;
 using System.Data;
+using System.Text.RegularExpressions;
 using Web_Api.Models;
 
 namespace Web_Api.Controllers;
@@ -318,6 +320,53 @@ public class UserController : ControllerBase
         }
         return all.ToArray();
     }
+    //SEARCH USERS BY CELL (phase 2 chat — start a conversation with a non-VD-member).
+    //[Authorize] here specifically, even though this controller isn't gated overall — this is
+    //a brand new endpoint being added now, not one of the ~80 pre-existing ones, and it exposes
+    //PII (name/role/location) by phone-number search so it gets the new-endpoint auth bar.
+    [HttpGet]
+    [Authorize]
+    [Route("searchbycell/{cell}")]
+    public IEnumerable<User> SearchByCell(string cell)
+    {
+        var digits = Regex.Replace(cell ?? "", @"\D", "");
+        var all = new List<User>();
+        if (digits.Length < 4) // avoid a near-unfiltered scan on a 1-3 digit query
+        {
+            return all;
+        }
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT number, Name, Surname, Cell, role, Ward, Voting_District, Municipality
+                FROM Users
+                WHERE REPLACE(REPLACE(REPLACE(Cell,' ',''),'-',''),'+','') LIKE CONCAT('%', @digits, '%')
+                LIMIT 20", con))
+            {
+                cmd.Parameters.AddWithValue("@digits", digits);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var u = new User();
+                        u.Id = dr["number"].ToString();
+                        u.Name = dr["Name"].ToString();
+                        u.Surname = dr["Surname"].ToString();
+                        u.Cell = dr["Cell"].ToString();
+                        u.Role = dr["role"].ToString();
+                        u.Ward = dr["Ward"].ToString();
+                        u.Voting_district = dr["Voting_District"].ToString();
+                        u.Municipality = dr["Municipality"].ToString();
+                        all.Add(u);
+                    }
+                }
+            }
+        }
+        return all;
+    }
+
     //GET USERS BY DELEGATION
     [HttpGet]
     [Route("bydelegation/{delegation}")]
