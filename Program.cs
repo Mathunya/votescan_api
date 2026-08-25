@@ -1,5 +1,9 @@
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using System.Text;
+using Web_Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -42,6 +46,25 @@ builder.Services.AddCors(p => p.AddPolicy("corspolicy", build =>
 build.WithOrigins("*").AllowAnyMethod().AllowAnyHeader().AllowAnyOrigin();
 }));
 
+// JWT bearer validation. Signing key/algorithm here must match LoginController.GenerateJwtToken
+// (HmacSha256, Jwt:SecretKey). Tokens are issued with no Issuer/Audience claim, so those checks stay off.
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:SecretKey"]!)),
+            ValidateIssuer = false,
+            ValidateAudience = false,
+            ValidateLifetime = true
+        };
+    });
+builder.Services.AddAuthorization();
+builder.Services.AddScoped<BroadcastScopeResolver>();
+builder.Services.AddScoped<BroadcastStore>();
+builder.Services.AddScoped<ChatStore>();
+
 var app = builder.Build();
 app.UseCors("corspolicy");
 // map hub endpoint
@@ -56,13 +79,17 @@ c.RoutePrefix = string.Empty; // Set the root path for Swagger UI
 });
 // Configure routing and endpoints
 app.UseRouting();
+app.UseHttpsRedirection();
+
+// Authentication must run before Authorization (it populates HttpContext.User that
+// Authorization/[Authorize] reads) — this order was previously reversed, which would have
+// silently broken [Authorize] the moment a scheme was registered above.
+app.UseAuthentication();
 app.UseAuthorization();
+
 #pragma warning disable ASP0014
 app.UseEndpoints(e => {});
 #pragma warning restore ASP0014
-
-app.UseAuthentication();
-app.UseHttpsRedirection();
 
 app.MapControllers();
 
