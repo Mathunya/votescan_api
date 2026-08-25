@@ -1,0 +1,14 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+
+## Secrets - contains live DB/JWT/WhatsApp credentials, keep local only
+appsettings.json
+
+## macOS
+.DS_Store
+
+## IDE
+.vs/
