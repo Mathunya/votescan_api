@@ -543,6 +543,162 @@ public class FrontDeskController : ControllerBase
         return all.ToArray();
     }
 
+    //-------------------------------------------------------
+    // GET REGIONAL COUNT
+    //-------------------------------------------------------
+    [HttpGet]
+    [Route("getregionalcount")]
+    public IEnumerable<FrontDeskCount> getregionalcount(string startDate, string endDate)
+    {
+        List<FrontDeskCount> all = new List<FrontDeskCount>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getFrontDeskRecorded", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@Sender", "regionalcount");
+                cmd.Parameters.AddWithValue("@startDate", startDate);
+                cmd.Parameters.AddWithValue("@endDate", endDate);
+                cmd.AddMissingStoredProcedureParameters();
+
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var num = new FrontDeskCount();
+                        num.region = dr["Region"].ToString();
+                        num.total1 = Convert.ToInt32(dr["Total"].ToString());
+                        num.total0 = Convert.ToInt32(dr["Total0"].ToString());
+                        all.Add(num);
+                    }
+                    dr.Close();
+                    con.Close();
+                }
+            }
+        }
+        return all.ToArray();
+    }
+
+    //-------------------------------------------------------
+    // GET MUNICIPAL COUNT
+    //-------------------------------------------------------
+    [HttpGet]
+    [Route("getmunicipalcount")]
+    public IEnumerable<FrontDeskCount> getmunicipalcount(string region, string startDate, string endDate)
+    {
+        List<FrontDeskCount> all = new List<FrontDeskCount>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getFrontDeskRecorded", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@region", region);
+                cmd.Parameters.AddWithValue("@Sender", "municipalcount");
+                cmd.Parameters.AddWithValue("@startDate", startDate);
+                cmd.Parameters.AddWithValue("@endDate", endDate);
+                cmd.AddMissingStoredProcedureParameters();
+
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var num = new FrontDeskCount();
+                        num.municipality = dr["Municipality"].ToString();
+                        num.total1 = Convert.ToInt32(dr["Total"].ToString());
+                        num.total0 = Convert.ToInt32(dr["Total0"].ToString());
+                        all.Add(num);
+                    }
+                    dr.Close();
+                    con.Close();
+                }
+            }
+        }
+        return all.ToArray();
+    }
+
+    //-------------------------------------------------------
+    // GET WARD COUNT
+    //-------------------------------------------------------
+    [HttpGet]
+    [Route("getwardcount")]
+    public IEnumerable<FrontDeskCount> getwardcount(string municipality, string startDate, string endDate)
+    {
+        List<FrontDeskCount> all = new List<FrontDeskCount>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getFrontDeskRecorded", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@Municipality", municipality);
+                cmd.Parameters.AddWithValue("@Sender", "wardcount");
+                cmd.Parameters.AddWithValue("@startDate", startDate);
+                cmd.Parameters.AddWithValue("@endDate", endDate);
+                cmd.AddMissingStoredProcedureParameters();
+
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var num = new FrontDeskCount();
+                        num.municipality = dr["WardID"].ToString();
+                        num.total1 = Convert.ToInt32(dr["Total"].ToString());
+                        num.total0 = Convert.ToInt32(dr["Total0"].ToString());
+                        all.Add(num);
+                    }
+                    dr.Close();
+                    con.Close();
+                }
+            }
+        }
+        return all.ToArray();
+    }
+
+    //-------------------------------------------------------
+    // GET VD COUNT
+    //-------------------------------------------------------
+    [HttpGet]
+    [Route("getvdcount")]
+    public IEnumerable<FrontDeskCount> getvdcount(string ward, string startDate, string endDate)
+    {
+        List<FrontDeskCount> all = new List<FrontDeskCount>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getFrontDeskRecorded", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@WardID", ward);
+                cmd.Parameters.AddWithValue("@Sender", "vdcount");
+                cmd.Parameters.AddWithValue("@startDate", startDate);
+                cmd.Parameters.AddWithValue("@endDate", endDate);
+                cmd.AddMissingStoredProcedureParameters();
+
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var num = new FrontDeskCount();
+                        num.vdNumber = dr["VDNumber"].ToString();
+                        num.vdName = dr["VDName"].ToString();
+                        num.total1 = Convert.ToInt32(dr["Total"].ToString());
+                        num.total0 = Convert.ToInt32(dr["Total0"].ToString());
+                        all.Add(num);
+                    }
+                    dr.Close();
+                    con.Close();
+                }
+            }
+        }
+        return all.ToArray();
+    }
+
     private static void AddMissingGetFrontDeskRecordedParameters(MySqlCommand cmd)
     {
         string[] parameterNames =

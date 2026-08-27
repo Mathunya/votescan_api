@@ -177,6 +177,49 @@ public class ReportsController : ControllerBase
     }
 
     [HttpGet]
+    [Route("getattitudebyscope")]
+    public IEnumerable<Report> getattitudebyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
+    {
+        MySqlDataReader dr;
+        List<Report> all = new List<Report>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getReports", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@sender", "attitudebyscope");
+                cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
+                cmd.AddMissingStoredProcedureParameters();
+
+                dr = cmd.ExecuteReader();
+
+                while (dr.Read())
+                {
+                    r = new Report();
+                    r.Municipality = dr["municipality"].ToString();
+                    r.Total = dr["voters"].ToString();
+                    r.Anc_supporters = dr["supporters"].ToString();
+                    r.Undecided = dr["undecided"].ToString();
+                    r.Non_supporters = dr["nonsupporters"].ToString();
+                    r.Not_captured = dr["notcaptured"].ToString();
+
+                    all.Add(r);
+                }
+
+                dr.Close();
+                con.Close();
+            }
+        }
+
+        return all.ToArray();
+    }
+
+    [HttpGet]
     [Route("getprovincialstats")]
     public IEnumerable<Report> getprovincialstats()
     {
@@ -293,7 +336,7 @@ public class ReportsController : ControllerBase
 
     [HttpGet]
     [Route("getprovincialnumbersbyscope")]
-    public IEnumerable<Report> getprovincialnumbersbyscope([FromQuery] string? region, [FromQuery] string? unit)
+    public IEnumerable<Report> getprovincialnumbersbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
     {
         MySqlDataReader dr;
         List<Report> all = new List<Report>();
@@ -307,6 +350,8 @@ public class ReportsController : ControllerBase
                 cmd.Parameters.AddWithValue("@sender", "provincialbyscope");
                 cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
                 cmd.AddMissingStoredProcedureParameters();
 
                 dr = cmd.ExecuteReader();
@@ -332,7 +377,7 @@ public class ReportsController : ControllerBase
 
     [HttpGet]
     [Route("getprovincialstatsbyscope")]
-    public IEnumerable<Report> getprovincialstatsbyscope([FromQuery] string? region, [FromQuery] string? unit)
+    public IEnumerable<Report> getprovincialstatsbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
     {
         MySqlDataReader dr;
         List<Report> all = new List<Report>();
@@ -346,6 +391,8 @@ public class ReportsController : ControllerBase
                 cmd.Parameters.AddWithValue("@sender", "provincialstatsbyscope");
                 cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
                 cmd.AddMissingStoredProcedureParameters();
 
                 dr = cmd.ExecuteReader();
@@ -370,7 +417,7 @@ public class ReportsController : ControllerBase
 
     [HttpGet]
     [Route("getprovincialagedemographicsbyscope")]
-    public IEnumerable<AgeDemographics> getprovincialagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit)
+    public IEnumerable<AgeDemographics> getprovincialagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
     {
         MySqlDataReader dr;
         AgeDemographics r;
@@ -385,6 +432,8 @@ public class ReportsController : ControllerBase
                 cmd.Parameters.AddWithValue("@sender", "provincialagedemographicsbyscope");
                 cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
                 cmd.AddMissingStoredProcedureParameters();
 
                 dr = cmd.ExecuteReader();
@@ -411,7 +460,7 @@ public class ReportsController : ControllerBase
 
     [HttpGet]
     [Route("getmunicipalagedemographicsbyscope")]
-    public IEnumerable<AgeDemographics> getmunicipalagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit)
+    public IEnumerable<AgeDemographics> getmunicipalagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
     {
         MySqlDataReader dr;
         AgeDemographics r;
@@ -426,6 +475,8 @@ public class ReportsController : ControllerBase
                 cmd.Parameters.AddWithValue("@sender", "municipalagedemographicsbyscope");
                 cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
                 cmd.AddMissingStoredProcedureParameters();
 
                 dr = cmd.ExecuteReader();
@@ -441,6 +492,75 @@ public class ReportsController : ControllerBase
                     r.over_65 = dr["over_65"].ToString();
 
                     all.Add(r);
+                }
+
+                dr.Close();
+                con.Close();
+            }
+        }
+
+        return all.ToArray();
+    }
+
+    [HttpGet]
+    [Route("getwardlist")]
+    public IEnumerable<WardListItem> getwardlist([FromQuery] string? region, [FromQuery] string? unit)
+    {
+        MySqlDataReader dr;
+        List<WardListItem> all = new List<WardListItem>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getReports", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@sender", "wardlist");
+                cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.AddMissingStoredProcedureParameters();
+
+                dr = cmd.ExecuteReader();
+
+                while (dr.Read())
+                {
+                    all.Add(new WardListItem { ward = dr["WardID"].ToString() });
+                }
+
+                dr.Close();
+                con.Close();
+            }
+        }
+
+        return all.ToArray();
+    }
+
+    [HttpGet]
+    [Route("getvdlist")]
+    public IEnumerable<VdListItem> getvdlist([FromQuery] string? ward)
+    {
+        MySqlDataReader dr;
+        List<VdListItem> all = new List<VdListItem>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getReports", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@sender", "vdlist");
+                cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
+                cmd.AddMissingStoredProcedureParameters();
+
+                dr = cmd.ExecuteReader();
+
+                while (dr.Read())
+                {
+                    all.Add(new VdListItem
+                    {
+                        vdNumber = dr["VDNumber"].ToString(),
+                        vdName = dr["VDName"].ToString(),
+                    });
                 }
 
                 dr.Close();
