@@ -292,6 +292,166 @@ public class ReportsController : ControllerBase
     }
 
     [HttpGet]
+    [Route("getprovincialnumbersbyscope")]
+    public IEnumerable<Report> getprovincialnumbersbyscope([FromQuery] string? region, [FromQuery] string? unit)
+    {
+        MySqlDataReader dr;
+        List<Report> all = new List<Report>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getReports", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@sender", "provincialbyscope");
+                cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.AddMissingStoredProcedureParameters();
+
+                dr = cmd.ExecuteReader();
+
+                while (dr.Read())
+                {
+                    r = new Report();
+                    r.Municipality = dr["municipality"].ToString();
+                    r.Special = dr["Special"].ToString();
+                    r.Recorded = dr["Recorded"].ToString();
+                    r.Total_1 = dr["Total_1"].ToString();
+
+                    all.Add(r);
+                }
+
+                dr.Close();
+                con.Close();
+            }
+        }
+
+        return all.ToArray();
+    }
+
+    [HttpGet]
+    [Route("getprovincialstatsbyscope")]
+    public IEnumerable<Report> getprovincialstatsbyscope([FromQuery] string? region, [FromQuery] string? unit)
+    {
+        MySqlDataReader dr;
+        List<Report> all = new List<Report>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getReports", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@sender", "provincialstatsbyscope");
+                cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.AddMissingStoredProcedureParameters();
+
+                dr = cmd.ExecuteReader();
+
+                while (dr.Read())
+                {
+                    r = new Report();
+                    r.Total_1 = dr["Recorded"].ToString();
+                    r.Total_2 = dr["AllVoters"].ToString();
+                    r.Total_3 = dr["Users"].ToString();
+
+                    all.Add(r);
+                }
+
+                dr.Close();
+                con.Close();
+            }
+        }
+
+        return all.ToArray();
+    }
+
+    [HttpGet]
+    [Route("getprovincialagedemographicsbyscope")]
+    public IEnumerable<AgeDemographics> getprovincialagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit)
+    {
+        MySqlDataReader dr;
+        AgeDemographics r;
+        List<AgeDemographics> all = new List<AgeDemographics>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getReports", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@sender", "provincialagedemographicsbyscope");
+                cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.AddMissingStoredProcedureParameters();
+
+                dr = cmd.ExecuteReader();
+
+                while (dr.Read())
+                {
+                    r = new AgeDemographics();
+                    r.voters = dr["voters"].ToString();
+                    r.youth = dr["youth"].ToString();
+                    r.between35_50 = dr["between_35_50"].ToString();
+                    r.between50_65 = dr["between_50_65"].ToString();
+                    r.over_65 = dr["over_65"].ToString();
+
+                    all.Add(r);
+                }
+
+                dr.Close();
+                con.Close();
+            }
+        }
+
+        return all.ToArray();
+    }
+
+    [HttpGet]
+    [Route("getmunicipalagedemographicsbyscope")]
+    public IEnumerable<AgeDemographics> getmunicipalagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit)
+    {
+        MySqlDataReader dr;
+        AgeDemographics r;
+        List<AgeDemographics> all = new List<AgeDemographics>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getReports", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@sender", "municipalagedemographicsbyscope");
+                cmd.Parameters.AddWithValue("@region", (object?)region ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
+                cmd.AddMissingStoredProcedureParameters();
+
+                dr = cmd.ExecuteReader();
+
+                while (dr.Read())
+                {
+                    r = new AgeDemographics();
+                    r.municipality = dr["municipality"].ToString();
+                    r.voters = dr["voters"].ToString();
+                    r.youth = dr["youth"].ToString();
+                    r.between35_50 = dr["between_35_50"].ToString();
+                    r.between50_65 = dr["between_50_65"].ToString();
+                    r.over_65 = dr["over_65"].ToString();
+
+                    all.Add(r);
+                }
+
+                dr.Close();
+                con.Close();
+            }
+        }
+
+        return all.ToArray();
+    }
+
+    [HttpGet]
     [Route("getregionalnumbers")]
     public IEnumerable<Report> getregionalnumbers()
     {
