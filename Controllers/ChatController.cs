@@ -8,6 +8,9 @@ namespace Web_Api.Controllers;
 public class SendMessageRequest
 {
     public string Body { get; set; } = "";
+    // Client-side compressed before this is sent — server independently re-enforces the 2MB cap.
+    public string? ImageBase64 { get; set; }
+    public string? ImageMimeType { get; set; }
 }
 
 // Phase 2 — one-to-one chat. [Authorize] here too, same reasoning as MessagingController:
@@ -21,12 +24,14 @@ public class ChatController : ControllerBase
     private readonly ChatStore _store;
     private readonly BroadcastScopeResolver _resolver;
     private readonly IHubContext<SessionHub> _hubContext;
+    private readonly ImageQuotaService _imageQuota;
 
-    public ChatController(ChatStore store, BroadcastScopeResolver resolver, IHubContext<SessionHub> hubContext)
+    public ChatController(ChatStore store, BroadcastScopeResolver resolver, IHubContext<SessionHub> hubContext, ImageQuotaService imageQuota)
     {
         _store = store;
         _resolver = resolver;
         _hubContext = hubContext;
+        _imageQuota = imageQuota;
     }
 
     private Task<int?> MeAsync() => _resolver.ResolveSenderNumberAsync(User.FindFirst("Cell")?.Value);
@@ -68,26 +73,46 @@ public class ChatController : ControllerBase
     [Route("thread/{conversationId}/messages")]
     public async Task<IActionResult> SendMessage(int conversationId, [FromBody] SendMessageRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.Body))
-            return BadRequest("Body is required.");
+        var (image, imageMimeType, imageError) = ImageQuotaService.DecodeAndValidate(request.ImageBase64, request.ImageMimeType);
+        if (imageError is not null) return BadRequest(imageError);
+
+        if (string.IsNullOrWhiteSpace(request.Body) && image is null)
+            return BadRequest("Body or image is required.");
 
         var me = await MeAsync();
         if (me is null) return Unauthorized();
         if (!await _store.IsParticipantAsync(conversationId, me.Value)) return Forbid();
 
-        var body = request.Body.Trim();
-        var messageId = await _store.InsertMessageAsync(conversationId, me.Value, body);
+        if (image is not null && !await _imageQuota.CanSendImageAsync(me.Value))
+            return BadRequest($"You've reached today's limit of {ImageQuotaService.MaxImagesPerDay} images. Try again after midnight.");
+
+        var body = request.Body?.Trim() ?? "";
+        var messageId = await _store.InsertMessageAsync(conversationId, me.Value, body, image, imageMimeType);
         var sentAt = DateTime.UtcNow;
 
         var otherId = await _store.GetOtherParticipantAsync(conversationId, me.Value);
         if (otherId is not null)
         {
             var cells = await _resolver.ResolveCellsAsync(new[] { otherId.Value });
-            var payload = new { id = messageId, conversationId, senderId = me.Value, body, sentAt };
+            var payload = new { id = messageId, conversationId, senderId = me.Value, body, sentAt, hasImage = image is not null };
             foreach (var cell in cells)
                 await _hubContext.Clients.Group(cell).SendAsync("NewChatMessage", payload);
         }
 
-        return Ok(new { id = messageId, conversationId, sentAt });
+        return Ok(new { id = messageId, conversationId, sentAt, hasImage = image is not null });
+    }
+
+    // Participant-checked in the store itself (conversation-scoped query), not just here.
+    [HttpGet]
+    [Route("thread/{conversationId}/messages/{messageId}/image")]
+    public async Task<IActionResult> MessageImage(int conversationId, long messageId)
+    {
+        var me = await MeAsync();
+        if (me is null) return Unauthorized();
+        if (!await _store.IsParticipantAsync(conversationId, me.Value)) return Forbid();
+
+        var image = await _store.GetMessageImageAsync(conversationId, messageId);
+        if (image is null) return NotFound();
+        return File(image.Value.Bytes, image.Value.MimeType);
     }
 }

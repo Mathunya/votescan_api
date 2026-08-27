@@ -66,6 +66,7 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<BroadcastScopeResolver>();
 builder.Services.AddScoped<BroadcastStore>();
 builder.Services.AddScoped<ChatStore>();
+builder.Services.AddScoped<ImageQuotaService>();
 
 var app = builder.Build();
 app.UseCors("corspolicy");

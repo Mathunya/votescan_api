@@ -15,6 +15,9 @@ public class BroadcastRequest
     public string? SubTier { get; set; }
     public string? ScopeValue { get; set; }
     public string Body { get; set; } = "";
+    // Client-side compressed before this is sent — server independently re-enforces the 2MB cap.
+    public string? ImageBase64 { get; set; }
+    public string? ImageMimeType { get; set; }
 }
 
 // Broadcast/chat endpoints. [Authorize] is scoped to this controller only —
@@ -29,6 +32,7 @@ public class MessagingController : ControllerBase
     private readonly IHubContext<SessionHub> _hubContext;
     private readonly FrappeApprovalClient _frappe;
     private readonly IConfiguration _config;
+    private readonly ImageQuotaService _imageQuota;
 
     // Broadcasts resolving to more recipients than this require Frappe review before they go
     // out — see the "moderation/abuse" design discussion. super user is exempt regardless of
@@ -37,21 +41,25 @@ public class MessagingController : ControllerBase
 
     public MessagingController(
         BroadcastScopeResolver resolver, BroadcastStore store, IHubContext<SessionHub> hubContext,
-        FrappeApprovalClient frappe, IConfiguration config)
+        FrappeApprovalClient frappe, IConfiguration config, ImageQuotaService imageQuota)
     {
         _resolver = resolver;
         _store = store;
         _hubContext = hubContext;
         _frappe = frappe;
         _config = config;
+        _imageQuota = imageQuota;
     }
 
     [HttpPost]
     [Route("broadcast")]
     public async Task<IActionResult> Broadcast([FromBody] BroadcastRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.Body))
-            return BadRequest("Body is required.");
+        var (image, imageMimeType, imageError) = ImageQuotaService.DecodeAndValidate(request.ImageBase64, request.ImageMimeType);
+        if (imageError is not null) return BadRequest(imageError);
+
+        if (string.IsNullOrWhiteSpace(request.Body) && image is null)
+            return BadRequest("Body or image is required.");
 
         var scope = string.IsNullOrEmpty(request.SubTier)
             ? await _resolver.ResolveOwnScopeAsync(User)
@@ -64,6 +72,9 @@ public class MessagingController : ControllerBase
         if (senderId is null)
             return Unauthorized("Could not resolve sender.");
 
+        if (image is not null && !await _imageQuota.CanSendImageAsync(senderId.Value))
+            return BadRequest($"You've reached today's limit of {ImageQuotaService.MaxImagesPerDay} images. Try again after midnight.");
+
         var role = User.FindFirst("Role")?.Value ?? "";
         var isSuperUser = string.Equals(role, "super user", StringComparison.OrdinalIgnoreCase);
         var needsApproval = !isSuperUser && scope.RecipientIds.Count > ApprovalRecipientThreshold;
@@ -71,14 +82,15 @@ public class MessagingController : ControllerBase
         if (needsApproval)
         {
             var pendingId = await _store.InsertBroadcastAsync(
-                senderId.Value, scope.Tier, scope.ScopeValue, request.Body, scope.RecipientIds.Count, status: "Pending");
+                senderId.Value, scope.Tier, scope.ScopeValue, request.Body, scope.RecipientIds.Count,
+                status: "Pending", image: image, imageMimeType: imageMimeType);
             try
             {
                 var senderName = await _resolver.GetSenderDisplayNameAsync(senderId.Value);
                 var frappeDocName = await _frappe.SubmitForApprovalAsync(
                     pendingId, senderName, role, User.FindFirst("Cell")?.Value ?? "",
                     scope.Tier, scope.ScopeValue, scope.RecipientIds.Count, request.Body,
-                    image: null, imageMimeType: null);
+                    image, imageMimeType);
                 await _store.SetFrappeDocNameAsync(pendingId, frappeDocName);
             }
             catch (Exception)
@@ -97,11 +109,14 @@ public class MessagingController : ControllerBase
         }
 
         var broadcastId = await _store.InsertBroadcastAsync(
-            senderId.Value, scope.Tier, scope.ScopeValue, request.Body, scope.RecipientIds.Count);
+            senderId.Value, scope.Tier, scope.ScopeValue, request.Body, scope.RecipientIds.Count,
+            image: image, imageMimeType: imageMimeType);
         await _store.InsertReceiptsAsync(broadcastId, scope.RecipientIds);
 
         // Live push, best-effort — GET /Messaging/mine is the source of truth for anyone
         // whose socket is dropped or the app isn't foregrounded (mobile sockets drop constantly).
+        // The image itself isn't pushed over the socket (too heavy for a websocket event) — the
+        // client sees hasImage and fetches it separately via GET /broadcast/{id}/image.
         var recipientCells = await _resolver.ResolveCellsAsync(scope.RecipientIds);
         var payload = new
         {
@@ -109,7 +124,8 @@ public class MessagingController : ControllerBase
             body = request.Body,
             tier = scope.Tier,
             scopeValue = scope.ScopeValue,
-            createdAt = DateTime.UtcNow
+            createdAt = DateTime.UtcNow,
+            hasImage = image is not null
         };
         foreach (var cell in recipientCells)
             await _hubContext.Clients.Group(cell).SendAsync("NewBroadcast", payload);
@@ -241,7 +257,8 @@ public class MessagingController : ControllerBase
                     body = pending.Body,
                     tier = pending.Tier,
                     scopeValue = pending.ScopeValue,
-                    createdAt = pending.CreatedAt
+                    createdAt = pending.CreatedAt,
+                    hasImage = pending.HasImage
                 };
                 foreach (var cell in recipientCells)
                     await _hubContext.Clients.Group(cell).SendAsync("NewBroadcast", pushPayload);
@@ -260,5 +277,19 @@ public class MessagingController : ControllerBase
         }
 
         return Ok();
+    }
+
+    // Visible to the sender or any actual recipient (checked in BroadcastStore, not here) — not
+    // the whole receipt list, so this can't be used to enumerate who else got the broadcast.
+    [HttpGet]
+    [Route("broadcast/{broadcastId}/image")]
+    public async Task<IActionResult> BroadcastImage(int broadcastId)
+    {
+        var myNumber = await _resolver.ResolveSenderNumberAsync(User.FindFirst("Cell")?.Value);
+        if (myNumber is null) return Unauthorized();
+
+        var image = await _store.GetBroadcastImageAsync(broadcastId, myNumber.Value);
+        if (image is null) return NotFound();
+        return File(image.Value.Bytes, image.Value.MimeType);
     }
 }
