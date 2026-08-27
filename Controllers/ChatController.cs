@@ -25,13 +25,17 @@ public class ChatController : ControllerBase
     private readonly BroadcastScopeResolver _resolver;
     private readonly IHubContext<SessionHub> _hubContext;
     private readonly ImageQuotaService _imageQuota;
+    private readonly PushNotificationService _push;
 
-    public ChatController(ChatStore store, BroadcastScopeResolver resolver, IHubContext<SessionHub> hubContext, ImageQuotaService imageQuota)
+    public ChatController(
+        ChatStore store, BroadcastScopeResolver resolver, IHubContext<SessionHub> hubContext,
+        ImageQuotaService imageQuota, PushNotificationService push)
     {
         _store = store;
         _resolver = resolver;
         _hubContext = hubContext;
         _imageQuota = imageQuota;
+        _push = push;
     }
 
     private Task<int?> MeAsync() => _resolver.ResolveSenderNumberAsync(User.FindFirst("Cell")?.Value);
@@ -97,6 +101,13 @@ public class ChatController : ControllerBase
             var payload = new { id = messageId, conversationId, senderId = me.Value, body, sentAt, hasImage = image is not null };
             foreach (var cell in cells)
                 await _hubContext.Clients.Group(cell).SendAsync("NewChatMessage", payload);
+
+            // OS-level banner if the other side isn't foregrounded/connected right now.
+            var senderName = await _resolver.GetSenderDisplayNameAsync(me.Value);
+            var pushTokens = await _resolver.ResolvePushTokensAsync(new[] { otherId.Value });
+            await _push.SendAsync(
+                pushTokens, senderName, image is not null && string.IsNullOrEmpty(body) ? "📷 Photo" : body,
+                new { type = "chat", conversationId, otherName = senderName });
         }
 
         return Ok(new { id = messageId, conversationId, sentAt, hasImage = image is not null });

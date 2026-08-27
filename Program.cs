@@ -28,6 +28,8 @@ builder.Services.AddSignalR();
 builder.Services.AddHttpClient();
 // used to submit/review broadcasts via the App Broadcast Approval doctype on ai.votescan.co.za
 builder.Services.AddHttpClient<Web_Api.Services.FrappeApprovalClient>();
+// used to send OS-level push notifications via Expo's push service
+builder.Services.AddHttpClient<Web_Api.Services.PushNotificationService>();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>

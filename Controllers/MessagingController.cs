@@ -20,6 +20,11 @@ public class BroadcastRequest
     public string? ImageMimeType { get; set; }
 }
 
+public class SavePushTokenRequest
+{
+    public string Token { get; set; } = "";
+}
+
 // Broadcast/chat endpoints. [Authorize] is scoped to this controller only —
 // the other ~80 existing controllers are untouched per the build plan.
 [Route("[controller]")]
@@ -33,6 +38,7 @@ public class MessagingController : ControllerBase
     private readonly FrappeApprovalClient _frappe;
     private readonly IConfiguration _config;
     private readonly ImageQuotaService _imageQuota;
+    private readonly PushNotificationService _push;
 
     // Broadcasts resolving to more recipients than this require Frappe review before they go
     // out — see the "moderation/abuse" design discussion. super user is exempt regardless of
@@ -41,7 +47,8 @@ public class MessagingController : ControllerBase
 
     public MessagingController(
         BroadcastScopeResolver resolver, BroadcastStore store, IHubContext<SessionHub> hubContext,
-        FrappeApprovalClient frappe, IConfiguration config, ImageQuotaService imageQuota)
+        FrappeApprovalClient frappe, IConfiguration config, ImageQuotaService imageQuota,
+        PushNotificationService push)
     {
         _resolver = resolver;
         _store = store;
@@ -49,6 +56,18 @@ public class MessagingController : ControllerBase
         _frappe = frappe;
         _config = config;
         _imageQuota = imageQuota;
+        _push = push;
+    }
+
+    [HttpPost]
+    [Route("push-token")]
+    public async Task<IActionResult> SavePushToken([FromBody] SavePushTokenRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Token)) return BadRequest("Token is required.");
+        var myNumber = await _resolver.ResolveSenderNumberAsync(User.FindFirst("Cell")?.Value);
+        if (myNumber is null) return Unauthorized();
+        await _resolver.SavePushTokenAsync(myNumber.Value, request.Token);
+        return Ok();
     }
 
     [HttpPost]
@@ -129,6 +148,10 @@ public class MessagingController : ControllerBase
         };
         foreach (var cell in recipientCells)
             await _hubContext.Clients.Group(cell).SendAsync("NewBroadcast", payload);
+
+        // OS-level banner even for recipients who aren't foregrounded/connected right now.
+        var pushTokens = await _resolver.ResolvePushTokensAsync(scope.RecipientIds);
+        await _push.SendAsync(pushTokens, "New Broadcast", request.Body, new { type = "broadcast", broadcastId });
 
         return Ok(new { broadcastId, status = "approved", tier = scope.Tier, scopeValue = scope.ScopeValue, recipientCount = scope.RecipientIds.Count });
     }
@@ -262,6 +285,9 @@ public class MessagingController : ControllerBase
                 };
                 foreach (var cell in recipientCells)
                     await _hubContext.Clients.Group(cell).SendAsync("NewBroadcast", pushPayload);
+
+                var pushTokens = await _resolver.ResolvePushTokensAsync(recipientIds);
+                await _push.SendAsync(pushTokens, "New Broadcast", pending.Body, new { type = "broadcast", broadcastId = pending.Id });
                 break;
 
             case "Rejected":

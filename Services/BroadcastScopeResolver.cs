@@ -264,6 +264,38 @@ public class BroadcastScopeResolver
         return result is null or DBNull ? null : Convert.ToInt32(result);
     }
 
+    // Overwrites any previous token for this user — one active device at a time, matching this
+    // app's existing single-session model (SessionHub already only tracks one live connection
+    // per Cell). Called on every login/app-foreground, so a stale token from a reinstalled app
+    // or a different device naturally gets replaced.
+    public async Task SavePushTokenAsync(int userId, string token)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand("UPDATE Users SET PushToken = @t WHERE number = @u", con);
+        cmd.Parameters.AddWithValue("@t", token);
+        cmd.Parameters.AddWithValue("@u", userId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task<List<string>> ResolvePushTokensAsync(IEnumerable<int> userNumbers)
+    {
+        var numbers = userNumbers.Distinct().ToList();
+        if (numbers.Count == 0) return new List<string>();
+
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            $"SELECT PushToken FROM Users WHERE number IN ({string.Join(",", numbers.Select((_, i) => "@n" + i))}) AND PushToken IS NOT NULL AND PushToken <> ''",
+            con);
+        for (int i = 0; i < numbers.Count; i++) cmd.Parameters.AddWithValue("@n" + i, numbers[i]);
+
+        var tokens = new List<string>();
+        using var dr = await cmd.ExecuteReaderAsync();
+        while (await dr.ReadAsync()) tokens.Add(dr.GetString(0));
+        return tokens;
+    }
+
     // Display name for the Frappe reviewer's benefit only — never used for anything security-relevant.
     public async Task<string> GetSenderDisplayNameAsync(int senderId)
     {
