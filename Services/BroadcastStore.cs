@@ -24,21 +24,100 @@ public class BroadcastStore
         _connect = config.GetConnectionString("ConsString")!;
     }
 
-    public async Task<int> InsertBroadcastAsync(int senderId, string tier, string? scopeValue, string body, int recipientCount)
+    public async Task<int> InsertBroadcastAsync(int senderId, string tier, string? scopeValue, string body, int recipientCount, string status = "Approved")
     {
         using var con = new MySqlConnection(_connect);
         await con.OpenAsync();
         using var cmd = new MySqlCommand(@"
-            INSERT INTO Broadcasts (SenderId, Tier, ScopeValue, Body, RecipientCount)
-            VALUES (@sender, @tier, @scope, @body, @count);
+            INSERT INTO Broadcasts (SenderId, Tier, ScopeValue, Body, RecipientCount, Status)
+            VALUES (@sender, @tier, @scope, @body, @count, @status);
             SELECT LAST_INSERT_ID();", con);
         cmd.Parameters.AddWithValue("@sender", senderId);
         cmd.Parameters.AddWithValue("@tier", tier);
         cmd.Parameters.AddWithValue("@scope", (object?)scopeValue ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@body", body);
         cmd.Parameters.AddWithValue("@count", recipientCount);
+        cmd.Parameters.AddWithValue("@status", status);
         var result = await cmd.ExecuteScalarAsync();
         return Convert.ToInt32(result);
+    }
+
+    public async Task SetFrappeDocNameAsync(int broadcastId, string frappeDocName)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand("UPDATE Broadcasts SET FrappeDocName = @doc WHERE Id = @id", con);
+        cmd.Parameters.AddWithValue("@doc", frappeDocName);
+        cmd.Parameters.AddWithValue("@id", broadcastId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public class PendingBroadcastDetail
+    {
+        public int Id { get; set; }
+        public int SenderId { get; set; }
+        public string Tier { get; set; } = "";
+        public string? ScopeValue { get; set; }
+        public string Body { get; set; } = "";
+        public string Status { get; set; } = "";
+        public DateTime CreatedAt { get; set; }
+    }
+
+    // Looked up by FrappeDocName (not by parsing the webhook's doc name as an int) — keeps the
+    // correlation explicit and doesn't assume Frappe's autoname always matches Broadcasts.Id.
+    public async Task<PendingBroadcastDetail?> GetByFrappeDocNameAsync(string frappeDocName)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "SELECT Id, SenderId, Tier, ScopeValue, Body, Status, CreatedAt FROM Broadcasts WHERE FrappeDocName = @doc", con);
+        cmd.Parameters.AddWithValue("@doc", frappeDocName);
+        using var dr = await cmd.ExecuteReaderAsync();
+        if (!await dr.ReadAsync()) return null;
+        return new PendingBroadcastDetail
+        {
+            Id = Convert.ToInt32(dr["Id"]),
+            SenderId = Convert.ToInt32(dr["SenderId"]),
+            Tier = dr["Tier"].ToString() ?? "",
+            ScopeValue = dr["ScopeValue"] is DBNull ? null : dr["ScopeValue"].ToString(),
+            Body = dr["Body"].ToString() ?? "",
+            Status = dr["Status"].ToString() ?? "",
+            CreatedAt = AsUtc(dr["CreatedAt"])
+        };
+    }
+
+    // Approval decision: delivery (BroadcastReceipts insert + RecipientCount) is done by the
+    // caller via InsertReceiptsAsync, same as the immediate-send path — this just flips status.
+    public async Task ApproveBroadcastAsync(int broadcastId, int recipientCount)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "UPDATE Broadcasts SET Status = 'Approved', RecipientCount = @count, ReviewedAt = UTC_TIMESTAMP() WHERE Id = @id", con);
+        cmd.Parameters.AddWithValue("@count", recipientCount);
+        cmd.Parameters.AddWithValue("@id", broadcastId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task RejectBroadcastAsync(int broadcastId, string? reason)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "UPDATE Broadcasts SET Status = 'Rejected', RejectionReason = @reason, ReviewedAt = UTC_TIMESTAMP() WHERE Id = @id", con);
+        cmd.Parameters.AddWithValue("@reason", (object?)reason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@id", broadcastId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task ExpireBroadcastAsync(int broadcastId)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "UPDATE Broadcasts SET Status = 'Expired', ReviewedAt = UTC_TIMESTAMP() WHERE Id = @id AND Status = 'Pending'", con);
+        cmd.Parameters.AddWithValue("@id", broadcastId);
+        await cmd.ExecuteNonQueryAsync();
     }
 
     public async Task InsertReceiptsAsync(int broadcastId, List<int> recipientIds)
