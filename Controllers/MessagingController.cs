@@ -116,7 +116,7 @@ public class MessagingController : ControllerBase
         var myNumber = await _resolver.ResolveSenderNumberAsync(User.FindFirst("Cell")?.Value);
         if (myNumber is null) return Unauthorized();
 
-        var items = await _store.GetUnreadForUserAsync(myNumber.Value);
+        var items = await _store.GetInboxForUserAsync(myNumber.Value);
         return Ok(items);
     }
 

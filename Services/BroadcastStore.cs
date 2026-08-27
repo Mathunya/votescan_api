@@ -9,6 +9,7 @@ public class BroadcastListItem
     public string Tier { get; set; } = "";
     public string? ScopeValue { get; set; }
     public DateTime CreatedAt { get; set; }
+    public DateTime? ReadAt { get; set; } // null = unread; set = read, kept visible for 24h from this timestamp
 }
 
 // Plain parameterized SQL against Broadcasts/BroadcastReceipts — follows the precedent set by
@@ -60,17 +61,24 @@ public class BroadcastStore
         }
     }
 
-    // Unread inbox — the app polls this on foreground/screen focus so nothing's lost to a
-    // dropped SignalR connection (mobile sockets drop constantly, per the design doc).
-    public async Task<List<BroadcastListItem>> GetUnreadForUserAsync(int userNumber)
+    // DATETIME columns come back from MySql.Data as DateTimeKind.Unspecified — the DB server's
+    // system_time_zone is UTC (confirmed), but System.Text.Json only appends 'Z' for Kind=Utc,
+    // so an untagged Unspecified value serializes with no timezone marker and the client's
+    // `new Date(iso)` then misreads it as local time instead of UTC.
+    private static DateTime AsUtc(object value) => DateTime.SpecifyKind(Convert.ToDateTime(value), DateTimeKind.Utc);
+
+    // Inbox — unread items, plus items read within the last 24h (kept visible so a tap doesn't
+    // make a notice vanish instantly; it just stops counting as unread and ages out a day later).
+    public async Task<List<BroadcastListItem>> GetInboxForUserAsync(int userNumber)
     {
         using var con = new MySqlConnection(_connect);
         await con.OpenAsync();
         using var cmd = new MySqlCommand(@"
-            SELECT b.Id, b.Body, b.Tier, b.ScopeValue, b.CreatedAt
+            SELECT b.Id, b.Body, b.Tier, b.ScopeValue, b.CreatedAt, r.ReadAt
             FROM BroadcastReceipts r
             JOIN Broadcasts b ON b.Id = r.BroadcastId
-            WHERE r.RecipientId = @user AND r.ReadAt IS NULL
+            WHERE r.RecipientId = @user
+              AND (r.ReadAt IS NULL OR r.ReadAt > UTC_TIMESTAMP() - INTERVAL 24 HOUR)
             ORDER BY b.CreatedAt DESC", con);
         cmd.Parameters.AddWithValue("@user", userNumber);
 
@@ -84,7 +92,8 @@ public class BroadcastStore
                 Body = dr["Body"].ToString() ?? "",
                 Tier = dr["Tier"].ToString() ?? "",
                 ScopeValue = dr["ScopeValue"] is DBNull ? null : dr["ScopeValue"].ToString(),
-                CreatedAt = Convert.ToDateTime(dr["CreatedAt"])
+                CreatedAt = AsUtc(dr["CreatedAt"]),
+                ReadAt = dr["ReadAt"] is DBNull ? null : AsUtc(dr["ReadAt"])
             });
         }
         return results;

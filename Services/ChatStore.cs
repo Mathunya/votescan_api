@@ -26,6 +26,13 @@ public class ChatMessageItem
 // BroadcastStore (follows UserSessions, not the older selector-branch stored proc convention).
 public class ChatStore
 {
+    // DATETIME columns come back from MySql.Data as DateTimeKind.Unspecified — the DB server's
+    // system_time_zone is UTC (confirmed), but System.Text.Json only appends 'Z' for Kind=Utc,
+    // so an untagged Unspecified value gets serialized with no timezone marker at all and the
+    // client's `new Date(iso)` then misreads it as local time instead of UTC. Every DateTime
+    // read back from the DB must be re-tagged before it reaches a response DTO.
+    private static DateTime AsUtc(object value) => DateTime.SpecifyKind(Convert.ToDateTime(value), DateTimeKind.Utc);
+
     private readonly string _connect;
 
     public ChatStore(IConfiguration config)
@@ -128,7 +135,7 @@ public class ChatStore
                 OtherName = $"{dr["Name"]} {dr["Surname"]}".Trim(),
                 OtherRole = dr["role"] is DBNull ? null : dr["role"].ToString(),
                 LastBody = dr["LastBody"] is DBNull ? null : dr["LastBody"].ToString(),
-                LastAt = dr["LastAt"] is DBNull ? null : Convert.ToDateTime(dr["LastAt"]),
+                LastAt = dr["LastAt"] is DBNull ? null : AsUtc(dr["LastAt"]),
                 UnreadCount = Convert.ToInt32(dr["UnreadCount"])
             });
         }
@@ -164,7 +171,7 @@ public class ChatStore
                 Id = Convert.ToInt64(dr["Id"]),
                 SenderId = senderId,
                 Body = dr["Body"].ToString() ?? "",
-                SentAt = Convert.ToDateTime(dr["SentAt"]),
+                SentAt = AsUtc(dr["SentAt"]),
                 IsMine = senderId == me
             });
         }
