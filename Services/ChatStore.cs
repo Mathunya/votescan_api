@@ -20,6 +20,7 @@ public class ChatMessageItem
     public string Body { get; set; } = "";
     public DateTime SentAt { get; set; }
     public bool IsMine { get; set; }
+    public bool HasImage { get; set; }
 }
 
 // Plain parameterized SQL against Conversations/ChatMessages — same precedent as
@@ -157,8 +158,10 @@ public class ChatStore
             await upd.ExecuteNonQueryAsync();
         }
 
+        // Deliberately not selecting Image here — the thread list stays lightweight, images are
+        // fetched separately via GetMessageImageAsync only when a bubble actually needs to render one.
         using var cmd = new MySqlCommand(
-            "SELECT Id, SenderId, Body, SentAt FROM ChatMessages WHERE ConversationId = @id ORDER BY SentAt ASC", con);
+            "SELECT Id, SenderId, Body, SentAt, Image IS NOT NULL AS HasImage FROM ChatMessages WHERE ConversationId = @id ORDER BY SentAt ASC", con);
         cmd.Parameters.AddWithValue("@id", conversationId);
 
         var results = new List<ChatMessageItem>();
@@ -172,22 +175,40 @@ public class ChatStore
                 SenderId = senderId,
                 Body = dr["Body"].ToString() ?? "",
                 SentAt = AsUtc(dr["SentAt"]),
-                IsMine = senderId == me
+                IsMine = senderId == me,
+                HasImage = Convert.ToBoolean(dr["HasImage"])
             });
         }
         return results;
     }
 
-    public async Task<long> InsertMessageAsync(int conversationId, int senderId, string body)
+    public async Task<long> InsertMessageAsync(int conversationId, int senderId, string body, byte[]? image = null, string? imageMimeType = null)
     {
         using var con = new MySqlConnection(_connect);
         await con.OpenAsync();
         using var cmd = new MySqlCommand(@"
-            INSERT INTO ChatMessages (ConversationId, SenderId, Body) VALUES (@c, @s, @b);
+            INSERT INTO ChatMessages (ConversationId, SenderId, Body, Image, ImageMimeType) VALUES (@c, @s, @b, @img, @mime);
             SELECT LAST_INSERT_ID();", con);
         cmd.Parameters.AddWithValue("@c", conversationId);
         cmd.Parameters.AddWithValue("@s", senderId);
         cmd.Parameters.AddWithValue("@b", body);
+        cmd.Parameters.AddWithValue("@img", (object?)image ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@mime", (object?)imageMimeType ?? DBNull.Value);
         return Convert.ToInt64(await cmd.ExecuteScalarAsync());
+    }
+
+    // Conversation-scoped by design (not just "SELECT ... WHERE Id=@id") — an extra layer under
+    // the controller's own participant check, same defense-in-depth pattern used elsewhere.
+    public async Task<(byte[] Bytes, string MimeType)?> GetMessageImageAsync(int conversationId, long messageId)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "SELECT Image, ImageMimeType FROM ChatMessages WHERE Id = @id AND ConversationId = @conv AND Image IS NOT NULL", con);
+        cmd.Parameters.AddWithValue("@id", messageId);
+        cmd.Parameters.AddWithValue("@conv", conversationId);
+        using var dr = await cmd.ExecuteReaderAsync();
+        if (!await dr.ReadAsync()) return null;
+        return ((byte[])dr["Image"], dr["ImageMimeType"] as string ?? "image/jpeg");
     }
 }

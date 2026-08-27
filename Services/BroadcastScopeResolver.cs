@@ -229,6 +229,28 @@ public class BroadcastScopeResolver
         return ids;
     }
 
+    // Re-resolves recipients from a Broadcasts row's own stored Tier/ScopeValue rather than a
+    // live JWT — used at approval-decision time (not submission time) for a gated broadcast,
+    // per the "resolve fresh" design: scope membership may have shifted in the review window.
+    // Deliberately skips the sender-claim/containment checks ResolveOwnScopeAsync/
+    // ResolveSubScopeAsync do — Tier+ScopeValue were already validated as in-scope back when
+    // the request was submitted, and that combination doesn't change on its own.
+    public async Task<List<int>> ResolveRecipientsForTierAsync(string tier, string? scopeValue)
+    {
+        var result = tier switch
+        {
+            "ALL" => await ResolveAllAsync(),
+            "VD" => await ResolveByColumnAsync("Voting_District", scopeValue, tier),
+            "WARD" => await ResolveByColumnAsync("Ward", scopeValue, tier),
+            "REGION" => await ResolveByColumnAsync("Region", scopeValue, tier),
+            "ZONE" => scopeValue is not null
+                ? await ResolveZoneByCodeAsync(scopeValue)
+                : new ScopeResolutionResult { Success = false },
+            _ => new ScopeResolutionResult { Success = false }
+        };
+        return result.Success ? result.RecipientIds : new List<int>();
+    }
+
     // The JWT's identity claim is Cell, not Users.number — resolve the sender's own number
     // (needed as Broadcasts.SenderId / a Users FK) from their own validated Cell claim.
     public async Task<int?> ResolveSenderNumberAsync(string? cell)
@@ -240,6 +262,50 @@ public class BroadcastScopeResolver
         cmd.Parameters.AddWithValue("@cell", cell);
         var result = await cmd.ExecuteScalarAsync();
         return result is null or DBNull ? null : Convert.ToInt32(result);
+    }
+
+    // Overwrites any previous token for this user — one active device at a time, matching this
+    // app's existing single-session model (SessionHub already only tracks one live connection
+    // per Cell). Called on every login/app-foreground, so a stale token from a reinstalled app
+    // or a different device naturally gets replaced.
+    public async Task SavePushTokenAsync(int userId, string token)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand("UPDATE Users SET PushToken = @t WHERE number = @u", con);
+        cmd.Parameters.AddWithValue("@t", token);
+        cmd.Parameters.AddWithValue("@u", userId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task<List<string>> ResolvePushTokensAsync(IEnumerable<int> userNumbers)
+    {
+        var numbers = userNumbers.Distinct().ToList();
+        if (numbers.Count == 0) return new List<string>();
+
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            $"SELECT PushToken FROM Users WHERE number IN ({string.Join(",", numbers.Select((_, i) => "@n" + i))}) AND PushToken IS NOT NULL AND PushToken <> ''",
+            con);
+        for (int i = 0; i < numbers.Count; i++) cmd.Parameters.AddWithValue("@n" + i, numbers[i]);
+
+        var tokens = new List<string>();
+        using var dr = await cmd.ExecuteReaderAsync();
+        while (await dr.ReadAsync()) tokens.Add(dr.GetString(0));
+        return tokens;
+    }
+
+    // Display name for the Frappe reviewer's benefit only — never used for anything security-relevant.
+    public async Task<string> GetSenderDisplayNameAsync(int senderId)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand("SELECT Name, Surname FROM Users WHERE number = @n", con);
+        cmd.Parameters.AddWithValue("@n", senderId);
+        using var dr = await cmd.ExecuteReaderAsync();
+        if (!await dr.ReadAsync()) return $"User #{senderId}";
+        return $"{dr["Name"]} {dr["Surname"]}".Trim();
     }
 
     // Maps Users.number -> Users.Cell for SignalR group addressing (SessionHub groups by Cell, not number).

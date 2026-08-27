@@ -10,6 +10,7 @@ public class BroadcastListItem
     public string? ScopeValue { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime? ReadAt { get; set; } // null = unread; set = read, kept visible for 24h from this timestamp
+    public bool HasImage { get; set; }
 }
 
 // Plain parameterized SQL against Broadcasts/BroadcastReceipts — follows the precedent set by
@@ -24,21 +25,124 @@ public class BroadcastStore
         _connect = config.GetConnectionString("ConsString")!;
     }
 
-    public async Task<int> InsertBroadcastAsync(int senderId, string tier, string? scopeValue, string body, int recipientCount)
+    public async Task<int> InsertBroadcastAsync(
+        int senderId, string tier, string? scopeValue, string body, int recipientCount,
+        string status = "Approved", byte[]? image = null, string? imageMimeType = null)
     {
         using var con = new MySqlConnection(_connect);
         await con.OpenAsync();
         using var cmd = new MySqlCommand(@"
-            INSERT INTO Broadcasts (SenderId, Tier, ScopeValue, Body, RecipientCount)
-            VALUES (@sender, @tier, @scope, @body, @count);
+            INSERT INTO Broadcasts (SenderId, Tier, ScopeValue, Body, RecipientCount, Status, Image, ImageMimeType)
+            VALUES (@sender, @tier, @scope, @body, @count, @status, @img, @mime);
             SELECT LAST_INSERT_ID();", con);
         cmd.Parameters.AddWithValue("@sender", senderId);
         cmd.Parameters.AddWithValue("@tier", tier);
         cmd.Parameters.AddWithValue("@scope", (object?)scopeValue ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@body", body);
         cmd.Parameters.AddWithValue("@count", recipientCount);
+        cmd.Parameters.AddWithValue("@status", status);
+        cmd.Parameters.AddWithValue("@img", (object?)image ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@mime", (object?)imageMimeType ?? DBNull.Value);
         var result = await cmd.ExecuteScalarAsync();
         return Convert.ToInt32(result);
+    }
+
+    // Broadcast images are visible to the sender or any actual recipient (has a receipt row) —
+    // unlike chat's single-conversation scoping, a broadcast can have hundreds of recipients.
+    public async Task<(byte[] Bytes, string MimeType)?> GetBroadcastImageAsync(int broadcastId, int requesterId)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(@"
+            SELECT b.Image, b.ImageMimeType FROM Broadcasts b
+            WHERE b.Id = @id AND b.Image IS NOT NULL
+              AND (b.SenderId = @me OR EXISTS (
+                  SELECT 1 FROM BroadcastReceipts r WHERE r.BroadcastId = b.Id AND r.RecipientId = @me))", con);
+        cmd.Parameters.AddWithValue("@id", broadcastId);
+        cmd.Parameters.AddWithValue("@me", requesterId);
+        using var dr = await cmd.ExecuteReaderAsync();
+        if (!await dr.ReadAsync()) return null;
+        return ((byte[])dr["Image"], dr["ImageMimeType"] as string ?? "image/jpeg");
+    }
+
+    public async Task SetFrappeDocNameAsync(int broadcastId, string frappeDocName)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand("UPDATE Broadcasts SET FrappeDocName = @doc WHERE Id = @id", con);
+        cmd.Parameters.AddWithValue("@doc", frappeDocName);
+        cmd.Parameters.AddWithValue("@id", broadcastId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public class PendingBroadcastDetail
+    {
+        public int Id { get; set; }
+        public int SenderId { get; set; }
+        public string Tier { get; set; } = "";
+        public string? ScopeValue { get; set; }
+        public string Body { get; set; } = "";
+        public string Status { get; set; } = "";
+        public DateTime CreatedAt { get; set; }
+        public bool HasImage { get; set; }
+    }
+
+    // Looked up by FrappeDocName (not by parsing the webhook's doc name as an int) — keeps the
+    // correlation explicit and doesn't assume Frappe's autoname always matches Broadcasts.Id.
+    public async Task<PendingBroadcastDetail?> GetByFrappeDocNameAsync(string frappeDocName)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "SELECT Id, SenderId, Tier, ScopeValue, Body, Status, CreatedAt, Image IS NOT NULL AS HasImage FROM Broadcasts WHERE FrappeDocName = @doc", con);
+        cmd.Parameters.AddWithValue("@doc", frappeDocName);
+        using var dr = await cmd.ExecuteReaderAsync();
+        if (!await dr.ReadAsync()) return null;
+        return new PendingBroadcastDetail
+        {
+            Id = Convert.ToInt32(dr["Id"]),
+            SenderId = Convert.ToInt32(dr["SenderId"]),
+            Tier = dr["Tier"].ToString() ?? "",
+            ScopeValue = dr["ScopeValue"] is DBNull ? null : dr["ScopeValue"].ToString(),
+            Body = dr["Body"].ToString() ?? "",
+            Status = dr["Status"].ToString() ?? "",
+            CreatedAt = AsUtc(dr["CreatedAt"]),
+            HasImage = Convert.ToBoolean(dr["HasImage"])
+        };
+    }
+
+    // Approval decision: delivery (BroadcastReceipts insert + RecipientCount) is done by the
+    // caller via InsertReceiptsAsync, same as the immediate-send path — this just flips status.
+    public async Task ApproveBroadcastAsync(int broadcastId, int recipientCount)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "UPDATE Broadcasts SET Status = 'Approved', RecipientCount = @count, ReviewedAt = UTC_TIMESTAMP() WHERE Id = @id", con);
+        cmd.Parameters.AddWithValue("@count", recipientCount);
+        cmd.Parameters.AddWithValue("@id", broadcastId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task RejectBroadcastAsync(int broadcastId, string? reason)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "UPDATE Broadcasts SET Status = 'Rejected', RejectionReason = @reason, ReviewedAt = UTC_TIMESTAMP() WHERE Id = @id", con);
+        cmd.Parameters.AddWithValue("@reason", (object?)reason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@id", broadcastId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task ExpireBroadcastAsync(int broadcastId)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "UPDATE Broadcasts SET Status = 'Expired', ReviewedAt = UTC_TIMESTAMP() WHERE Id = @id AND Status = 'Pending'", con);
+        cmd.Parameters.AddWithValue("@id", broadcastId);
+        await cmd.ExecuteNonQueryAsync();
     }
 
     public async Task InsertReceiptsAsync(int broadcastId, List<int> recipientIds)
@@ -74,7 +178,7 @@ public class BroadcastStore
         using var con = new MySqlConnection(_connect);
         await con.OpenAsync();
         using var cmd = new MySqlCommand(@"
-            SELECT b.Id, b.Body, b.Tier, b.ScopeValue, b.CreatedAt, r.ReadAt
+            SELECT b.Id, b.Body, b.Tier, b.ScopeValue, b.CreatedAt, r.ReadAt, b.Image IS NOT NULL AS HasImage
             FROM BroadcastReceipts r
             JOIN Broadcasts b ON b.Id = r.BroadcastId
             WHERE r.RecipientId = @user
@@ -93,7 +197,8 @@ public class BroadcastStore
                 Tier = dr["Tier"].ToString() ?? "",
                 ScopeValue = dr["ScopeValue"] is DBNull ? null : dr["ScopeValue"].ToString(),
                 CreatedAt = AsUtc(dr["CreatedAt"]),
-                ReadAt = dr["ReadAt"] is DBNull ? null : AsUtc(dr["ReadAt"])
+                ReadAt = dr["ReadAt"] is DBNull ? null : AsUtc(dr["ReadAt"]),
+                HasImage = Convert.ToBoolean(dr["HasImage"])
             });
         }
         return results;
