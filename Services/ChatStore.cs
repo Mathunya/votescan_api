@@ -8,6 +8,10 @@ public class ConversationListItem
     public int OtherUserId { get; set; }
     public string OtherName { get; set; } = "";
     public string? OtherRole { get; set; }
+    public string? OtherProvince { get; set; }
+    public string? OtherRegion { get; set; }
+    public string? OtherMunicipality { get; set; }
+    public string? OtherWard { get; set; }
     public string? LastBody { get; set; }
     public DateTime? LastAt { get; set; }
     public int UnreadCount { get; set; }
@@ -115,7 +119,7 @@ public class ChatStore
         using var cmd = new MySqlCommand(@"
             SELECT c.Id AS ConvId,
                    CASE WHEN c.UserA = @me THEN c.UserB ELSE c.UserA END AS OtherId,
-                   u.Name, u.Surname, u.role,
+                   u.Name, u.Surname, u.role, u.Province, u.Region, u.Municipality, u.Ward,
                    (SELECT Body FROM ChatMessages m WHERE m.ConversationId = c.Id ORDER BY m.SentAt DESC LIMIT 1) AS LastBody,
                    (SELECT SentAt FROM ChatMessages m WHERE m.ConversationId = c.Id ORDER BY m.SentAt DESC LIMIT 1) AS LastAt,
                    (SELECT COUNT(*) FROM ChatMessages m WHERE m.ConversationId = c.Id AND m.SenderId <> @me AND m.ReadAt IS NULL) AS UnreadCount
@@ -135,6 +139,10 @@ public class ChatStore
                 OtherUserId = Convert.ToInt32(dr["OtherId"]),
                 OtherName = $"{dr["Name"]} {dr["Surname"]}".Trim(),
                 OtherRole = dr["role"] is DBNull ? null : dr["role"].ToString(),
+                OtherProvince = dr["Province"] is DBNull ? null : dr["Province"].ToString(),
+                OtherRegion = dr["Region"] is DBNull ? null : dr["Region"].ToString(),
+                OtherMunicipality = dr["Municipality"] is DBNull ? null : dr["Municipality"].ToString(),
+                OtherWard = dr["Ward"] is DBNull ? null : dr["Ward"].ToString(),
                 LastBody = dr["LastBody"] is DBNull ? null : dr["LastBody"].ToString(),
                 LastAt = dr["LastAt"] is DBNull ? null : AsUtc(dr["LastAt"]),
                 UnreadCount = Convert.ToInt32(dr["UnreadCount"])

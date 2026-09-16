@@ -4,6 +4,7 @@ using MySql.Data.MySqlClient;
 using System.Data;
 using System.Text.RegularExpressions;
 using Web_Api.Models;
+using Web_Api.Services;
 
 namespace Web_Api.Controllers;
 
@@ -14,13 +15,14 @@ public class UserController : ControllerBase
     private IConfiguration? _config;
     private User? u;
     private string? connect;
-    
+    private readonly PresenceStore _presence;
 
-    public UserController(IConfiguration configuration)
+    public UserController(IConfiguration configuration, PresenceStore presence)
     {
         _config = configuration;
         connect = _config.GetConnectionString("ConsString");
         u = new User();
+        _presence = presence;
     }
     //GET ALL USERS
     // [HttpGet]
@@ -365,6 +367,32 @@ public class UserController : ControllerBase
             }
         }
         return all;
+    }
+
+    // Last-seen presence for a batch of users (a conversations list, a VD Team list) — see
+    // PresenceStore for how LastSeen is written and what "Online" means. [Authorize] here for
+    // the same reason as searchbycell: a new endpoint exposing user activity data.
+    [HttpGet]
+    [Authorize]
+    [Route("presence")]
+    public async Task<IActionResult> Presence([FromQuery] string ids)
+    {
+        var numbers = (ids ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(s => int.TryParse(s, out var n) ? n : (int?)null)
+            .Where(n => n.HasValue)
+            .Select(n => n!.Value)
+            .Distinct()
+            .ToList();
+
+        if (numbers.Count == 0) return Ok(Array.Empty<object>());
+
+        var map = await _presence.GetPresenceMapAsync(numbers);
+        var result = numbers.Select(n => map.TryGetValue(n, out var info)
+            ? new { id = n, online = info.Online, lastSeen = (DateTime?)info.LastSeen }
+            : new { id = n, online = false, lastSeen = (DateTime?)null });
+
+        return Ok(result);
     }
 
     //GET USERS BY DELEGATION

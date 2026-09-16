@@ -137,6 +137,7 @@ public class MessagingController : ControllerBase
         // The image itself isn't pushed over the socket (too heavy for a websocket event) — the
         // client sees hasImage and fetches it separately via GET /broadcast/{id}/image.
         var recipientCells = await _resolver.ResolveCellsAsync(scope.RecipientIds);
+        var senderDetails = await _resolver.GetSenderDetailsAsync(senderId.Value);
         var payload = new
         {
             id = broadcastId,
@@ -144,7 +145,14 @@ public class MessagingController : ControllerBase
             tier = scope.Tier,
             scopeValue = scope.ScopeValue,
             createdAt = DateTime.UtcNow,
-            hasImage = image is not null
+            hasImage = image is not null,
+            senderName = senderDetails.Name,
+            senderRole = senderDetails.Role,
+            senderDelegation = senderDetails.Delegation,
+            senderProvince = senderDetails.Province,
+            senderRegion = senderDetails.Region,
+            senderMunicipality = senderDetails.Municipality,
+            senderWard = senderDetails.Ward
         };
         foreach (var cell in recipientCells)
             await _hubContext.Clients.Group(cell).SendAsync("NewBroadcast", payload);
@@ -274,6 +282,7 @@ public class MessagingController : ControllerBase
                 await _store.ApproveBroadcastAsync(pending.Id, recipientIds.Count);
 
                 var recipientCells = await _resolver.ResolveCellsAsync(recipientIds);
+                var senderDetails = await _resolver.GetSenderDetailsAsync(pending.SenderId);
                 var pushPayload = new
                 {
                     id = pending.Id,
@@ -281,7 +290,14 @@ public class MessagingController : ControllerBase
                     tier = pending.Tier,
                     scopeValue = pending.ScopeValue,
                     createdAt = pending.CreatedAt,
-                    hasImage = pending.HasImage
+                    hasImage = pending.HasImage,
+                    senderName = senderDetails.Name,
+                    senderRole = senderDetails.Role,
+                    senderDelegation = senderDetails.Delegation,
+                    senderProvince = senderDetails.Province,
+                    senderRegion = senderDetails.Region,
+                    senderMunicipality = senderDetails.Municipality,
+                    senderWard = senderDetails.Ward
                 };
                 foreach (var cell in recipientCells)
                     await _hubContext.Clients.Group(cell).SendAsync("NewBroadcast", pushPayload);

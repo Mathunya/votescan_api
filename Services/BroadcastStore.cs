@@ -11,6 +11,13 @@ public class BroadcastListItem
     public DateTime CreatedAt { get; set; }
     public DateTime? ReadAt { get; set; } // null = unread; set = read, kept visible for 24h from this timestamp
     public bool HasImage { get; set; }
+    public string SenderName { get; set; } = "";
+    public string? SenderRole { get; set; }
+    public string? SenderDelegation { get; set; }
+    public string? SenderProvince { get; set; }
+    public string? SenderRegion { get; set; }
+    public string? SenderMunicipality { get; set; }
+    public string? SenderWard { get; set; }
 }
 
 // Plain parameterized SQL against Broadcasts/BroadcastReceipts — follows the precedent set by
@@ -178,9 +185,13 @@ public class BroadcastStore
         using var con = new MySqlConnection(_connect);
         await con.OpenAsync();
         using var cmd = new MySqlCommand(@"
-            SELECT b.Id, b.Body, b.Tier, b.ScopeValue, b.CreatedAt, r.ReadAt, b.Image IS NOT NULL AS HasImage
+            SELECT b.Id, b.Body, b.Tier, b.ScopeValue, b.CreatedAt, r.ReadAt, b.Image IS NOT NULL AS HasImage,
+                   u.Name AS SenderFirstName, u.Surname AS SenderSurname, u.role AS SenderRole,
+                   u.Delegation AS SenderDelegation, u.Province AS SenderProvince, u.Region AS SenderRegion,
+                   u.Municipality AS SenderMunicipality, u.Ward AS SenderWard
             FROM BroadcastReceipts r
             JOIN Broadcasts b ON b.Id = r.BroadcastId
+            LEFT JOIN Users u ON u.number = b.SenderId
             WHERE r.RecipientId = @user
               AND (r.ReadAt IS NULL OR r.ReadAt > UTC_TIMESTAMP() - INTERVAL 24 HOUR)
             ORDER BY b.CreatedAt DESC", con);
@@ -198,7 +209,14 @@ public class BroadcastStore
                 ScopeValue = dr["ScopeValue"] is DBNull ? null : dr["ScopeValue"].ToString(),
                 CreatedAt = AsUtc(dr["CreatedAt"]),
                 ReadAt = dr["ReadAt"] is DBNull ? null : AsUtc(dr["ReadAt"]),
-                HasImage = Convert.ToBoolean(dr["HasImage"])
+                HasImage = Convert.ToBoolean(dr["HasImage"]),
+                SenderName = $"{dr["SenderFirstName"]} {dr["SenderSurname"]}".Trim(),
+                SenderRole = dr["SenderRole"] is DBNull ? null : dr["SenderRole"].ToString(),
+                SenderDelegation = dr["SenderDelegation"] is DBNull ? null : dr["SenderDelegation"].ToString(),
+                SenderProvince = dr["SenderProvince"] is DBNull ? null : dr["SenderProvince"].ToString(),
+                SenderRegion = dr["SenderRegion"] is DBNull ? null : dr["SenderRegion"].ToString(),
+                SenderMunicipality = dr["SenderMunicipality"] is DBNull ? null : dr["SenderMunicipality"].ToString(),
+                SenderWard = dr["SenderWard"] is DBNull ? null : dr["SenderWard"].ToString()
             });
         }
         return results;
