@@ -69,6 +69,19 @@ public class LoginController : ControllerBase{
             return StatusCode(StatusCodes.Status503ServiceUnavailable, "Database server is unavailable. Check the MariaDB host, port, VPN/network, and firewall.");
         }
 
+        if (request.appVersion.HasValue)
+        {
+            try
+            {
+                await SaveAppVersionAsync(user.Cell, request.appVersion.Value);
+            }
+            catch (MySqlException ex)
+            {
+                // Best-effort telemetry — never block a login over this.
+                _logger.LogWarning(ex, "Unable to save app version for user {Cell}", user.Cell);
+            }
+        }
+
         var token = GenerateJwtToken(user, sessionId);
 
         return Ok(new
@@ -152,6 +165,21 @@ public class LoginController : ControllerBase{
         cmd.Parameters.AddWithValue("@sessionId", sessionId);
 
         cmd.AddMissingStoredProcedureParameters();
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task SaveAppVersionAsync(string userId, int appVersion)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+
+        var cmd = new MySqlCommand(@"
+            UPDATE Users SET AppVersion = @appVersion WHERE Cell = @userId
+        ", con);
+
+        cmd.Parameters.AddWithValue("@appVersion", appVersion);
+        cmd.Parameters.AddWithValue("@userId", userId);
 
         await cmd.ExecuteNonQueryAsync();
     }
