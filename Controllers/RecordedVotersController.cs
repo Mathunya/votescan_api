@@ -900,7 +900,7 @@ public class RecordedVotersController : ControllerBase
     //   a Mangaung zone (e.g. "zone 1")         -> wards within that zone
     //   a Matjhabeng/Maluti a Phofung cluster    -> wards within that cluster
     //     (e.g. "Thabong Central", "Monontsha")
-    // timeframe: today | week | 2weeks | 30days | 90days
+    // timeframe: today | yesterday | 3days | week | 2weeks | 30days | 90days
     [HttpGet]
     [Route("getbytimeframe/{municipality}/{timeframe}")]
     public IEnumerable<RecordedVoters> getbytimeframe(string municipality, string timeframe)
@@ -1012,6 +1012,60 @@ public class RecordedVotersController : ControllerBase
             }
         }
         return all.ToArray();
+    }
+
+    // Canvassing totals per volunteer (Officials Canvassing report). Raw SQL rather than the
+    // getRecordedVoters SP, matching the newer-endpoint convention (see SearchByCell above) —
+    // returns EVERY volunteer's count for the timeframe rather than being scoped to a caller-
+    // supplied cell list, because RecordedVoters.volunteer is a free-typed phone number and
+    // Users.Cell is often messy (spaces/parentheses/+27/unicode direction marks — see
+    // [[users-municipality-backfill]]/[[recorded-voters-getbytimeframe]] memory), so exact-string
+    // IN-clause matching would silently miss people. The caller normalizes both sides to a
+    // last-9-digits key instead (see FrontDesk /RecordedVoters/reports for the same convention).
+    // Timeframe keys mirror getRecordedVoters' getbytimeframe branch (today/yesterday/3days/week/
+    // 2weeks/30days/90days, default 30days) so this stays consistent with the rest of the app.
+    // Note there's no upper bound on the range (WHERE date >= @rangeStart below), so "yesterday"
+    // here means "since yesterday" rather than a strict single calendar day.
+    [HttpGet]
+    [Route("canvassingtotalsbyvolunteer/{timeframe}")]
+    public IActionResult CanvassingTotalsByVolunteer(string timeframe)
+    {
+        DateTime rangeStart = (timeframe?.ToLowerInvariant()) switch
+        {
+            "today" => DateTime.Today,
+            "yesterday" => DateTime.Today.AddDays(-1),
+            "3days" => DateTime.Today.AddDays(-3),
+            "week" => DateTime.Today.AddDays(-7),
+            "2weeks" => DateTime.Today.AddDays(-14),
+            "30days" => DateTime.Today.AddDays(-30),
+            "90days" => DateTime.Today.AddDays(-90),
+            _ => DateTime.Today.AddDays(-30),
+        };
+
+        var totals = new Dictionary<string, int>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT volunteer, COUNT(*) AS canvassed
+                FROM RecordedVoters
+                WHERE volunteer IS NOT NULL AND volunteer != '' AND date >= @rangeStart
+                GROUP BY volunteer", con))
+            {
+                cmd.Parameters.AddWithValue("@rangeStart", rangeStart);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var volunteer = dr["volunteer"].ToString() ?? "";
+                        totals[volunteer] = Convert.ToInt32(dr["canvassed"]);
+                    }
+                }
+            }
+        }
+
+        return Ok(totals);
     }
 
     private static void AddMissingGetRecordedVotersParameters(MySqlCommand cmd)
