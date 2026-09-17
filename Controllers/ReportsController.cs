@@ -176,9 +176,65 @@ public class ReportsController : ControllerBase
         return all.ToArray();
     }
 
+    // Powers the Regional Attitude pie chart's "Issues" mode on the dashboard
+    // Home page: one row per (municipality-or-zone, issue) pair within the
+    // given region, using the same recursive-CTE issue-splitting logic as
+    // getissues() above, scoped via getReports' "issuesbyscope" sender.
+    // Mangaung has no municipalities of its own, so that region's rows are
+    // grouped by zone instead — mirrors getattitudebyscope's region=Mangaung
+    // branch exactly.
+    [HttpGet]
+    [Route("getissuesbyscope/{region}")]
+    public IEnumerable<IssueScope> getissuesbyscope(string region, [FromQuery] string? timeframe)
+    {
+        MySqlDataReader dr;
+        List<IssueScope> all = new List<IssueScope>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getReports", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@region", region);
+                cmd.Parameters.AddWithValue("@sender", "issuesbyscope");
+                // "description" is an otherwise-unused parameter on getReports —
+                // repurposed here (and on getattitudebyscope below) to carry the
+                // timeframe key, so the issuesbyscope/attitudebyscope selectors'
+                // date filter can reuse it without a signature change.
+                cmd.Parameters.AddWithValue("@description", (object?)timeframe ?? DBNull.Value);
+                cmd.AddMissingStoredProcedureParameters();
+
+                dr = cmd.ExecuteReader();
+
+                while (dr.Read())
+                {
+                    IssueScope i = new IssueScope();
+                    i.Municipality = dr["municipality"].ToString();
+                    i.Issue = dr["issue"].ToString();
+                    i.Occurance = Convert.ToInt32(dr["occurance"]);
+
+                    all.Add(i);
+                }
+
+                dr.Close();
+                con.Close();
+            }
+        }
+
+        return all.ToArray();
+    }
+
+    public class IssueScope
+    {
+        public string? Municipality { get; set; }
+        public string? Issue { get; set; }
+        public int Occurance { get; set; }
+    }
+
     [HttpGet]
     [Route("getattitudebyscope")]
-    public IEnumerable<Report> getattitudebyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
+    public IEnumerable<Report> getattitudebyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd, [FromQuery] string? timeframe)
     {
         MySqlDataReader dr;
         List<Report> all = new List<Report>();
@@ -194,6 +250,7 @@ public class ReportsController : ControllerBase
                 cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@description", (object?)timeframe ?? DBNull.Value);
                 cmd.AddMissingStoredProcedureParameters();
 
                 dr = cmd.ExecuteReader();
