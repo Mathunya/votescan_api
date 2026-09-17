@@ -69,6 +69,7 @@ builder.Services.AddScoped<BroadcastScopeResolver>();
 builder.Services.AddScoped<BroadcastStore>();
 builder.Services.AddScoped<ChatStore>();
 builder.Services.AddScoped<ImageQuotaService>();
+builder.Services.AddScoped<PresenceStore>();
 
 var app = builder.Build();
 app.UseCors("corspolicy");

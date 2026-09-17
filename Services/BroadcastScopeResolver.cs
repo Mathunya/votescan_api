@@ -308,6 +308,41 @@ public class BroadcastScopeResolver
         return $"{dr["Name"]} {dr["Surname"]}".Trim();
     }
 
+    public class SenderDetails
+    {
+        public string Name { get; set; } = "";
+        public string? Role { get; set; }
+        public string? Delegation { get; set; }
+        public string? Province { get; set; }
+        public string? Region { get; set; }
+        public string? Municipality { get; set; }
+        public string? Ward { get; set; }
+    }
+
+    // Full sender detail block for the live SignalR NewBroadcast payload — same fields
+    // GetInboxForUserAsync returns via its own JOIN, kept consistent so the live push and the
+    // REST catch-up (GET /Messaging/mine) render identically.
+    public async Task<SenderDetails> GetSenderDetailsAsync(int senderId)
+    {
+        using var con = new MySqlConnection(_connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(
+            "SELECT Name, Surname, role, Delegation, Province, Region, Municipality, Ward FROM Users WHERE number = @n", con);
+        cmd.Parameters.AddWithValue("@n", senderId);
+        using var dr = await cmd.ExecuteReaderAsync();
+        if (!await dr.ReadAsync()) return new SenderDetails { Name = $"User #{senderId}" };
+        return new SenderDetails
+        {
+            Name = $"{dr["Name"]} {dr["Surname"]}".Trim(),
+            Role = dr["role"] is DBNull ? null : dr["role"].ToString(),
+            Delegation = dr["Delegation"] is DBNull ? null : dr["Delegation"].ToString(),
+            Province = dr["Province"] is DBNull ? null : dr["Province"].ToString(),
+            Region = dr["Region"] is DBNull ? null : dr["Region"].ToString(),
+            Municipality = dr["Municipality"] is DBNull ? null : dr["Municipality"].ToString(),
+            Ward = dr["Ward"] is DBNull ? null : dr["Ward"].ToString()
+        };
+    }
+
     // Maps Users.number -> Users.Cell for SignalR group addressing (SessionHub groups by Cell, not number).
     public async Task<List<string>> ResolveCellsAsync(IEnumerable<int> userNumbers)
     {
