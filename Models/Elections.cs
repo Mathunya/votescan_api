@@ -8,4 +8,5 @@ public class Elections
     public string? status { get; set; }
     public string? Ward { get; set; }
      public string? date { get; set; }
+    public string? ProclaimedDate { get; set; }
 }
