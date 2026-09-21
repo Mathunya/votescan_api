@@ -229,7 +229,7 @@ public class BroadcastStore
         using var con = new MySqlConnection(_connect);
         await con.OpenAsync();
         using var cmd = new MySqlCommand(
-            "UPDATE BroadcastReceipts SET ReadAt = NOW() WHERE BroadcastId = @b AND RecipientId = @u AND ReadAt IS NULL",
+            "UPDATE BroadcastReceipts SET ReadAt = UTC_TIMESTAMP() WHERE BroadcastId = @b AND RecipientId = @u AND ReadAt IS NULL",
             con);
         cmd.Parameters.AddWithValue("@b", broadcastId);
         cmd.Parameters.AddWithValue("@u", userNumber);
