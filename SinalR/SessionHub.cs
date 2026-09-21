@@ -40,6 +40,21 @@ public class SessionHub : Hub
         await _presenceStore.MarkSeenAsync(userId);
     }
 
+    // Same as ReportAppVersion plus the EAS OTA update id the app is running, so the dashboard can
+    // show which release each user is on. Separate method (SignalR hub methods can't be overloaded)
+    // so older app builds that call ReportAppVersion keep working unchanged.
+    public async Task ReportAppInfo(string userId, int appVersion, string? updateId)
+    {
+        try
+        {
+            await _welcome.ReportAppVersionAsync(userId, appVersion, updateId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "ReportAppInfo failed for {Cell}", userId);
+        }
+    }
+
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
         // optional: cleanup

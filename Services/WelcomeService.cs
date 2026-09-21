@@ -85,9 +85,24 @@ public class WelcomeService
         return _flagValue;
     }
 
-    public async Task ReportAppVersionAsync(string cell, int appVersion)
+    // The hub method is unauthenticated (like RegisterSession), so only store an update id that
+    // looks like one: a UUID, or the literal "embedded" the app sends when it runs its built-in bundle.
+    private static string? CleanUpdateId(string? updateId)
+    {
+        if (string.IsNullOrWhiteSpace(updateId)) return null;
+        updateId = updateId.Trim();
+        if (updateId.Length > 40) return null;
+        foreach (var ch in updateId)
+            if (!(char.IsAsciiLetterOrDigit(ch) || ch == '-')) return null;
+        return updateId;
+    }
+
+    // updateId = the EAS OTA update the app is running (expo-updates' updateId), or "embedded".
+    // Null from older app builds, which leaves any stored value alone.
+    public async Task ReportAppVersionAsync(string cell, int appVersion, string? updateId = null)
     {
         if (string.IsNullOrWhiteSpace(cell) || cell == SystemCell) return;
+        var cleanUpdateId = CleanUpdateId(updateId);
 
         // Only write when something changed or the last report is over an hour old — the app
         // reports on every foreground, no need to rewrite the row each time.
@@ -96,12 +111,14 @@ public class WelcomeService
             await con.OpenAsync();
             using var cmd = new MySqlCommand(@"
                 UPDATE Users
-                SET AppVersion = @v, AppVersionReportedAt = UTC_TIMESTAMP()
+                SET AppVersion = @v, AppUpdateId = COALESCE(@u, AppUpdateId), AppVersionReportedAt = UTC_TIMESTAMP()
                 WHERE Cell = @cell
                   AND (AppVersion IS NULL OR AppVersion <> @v
+                       OR (@u IS NOT NULL AND (AppUpdateId IS NULL OR AppUpdateId <> @u))
                        OR AppVersionReportedAt IS NULL
                        OR AppVersionReportedAt < UTC_TIMESTAMP() - INTERVAL 1 HOUR)", con);
             cmd.Parameters.AddWithValue("@v", appVersion);
+            cmd.Parameters.AddWithValue("@u", (object?)cleanUpdateId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@cell", cell);
             await cmd.ExecuteNonQueryAsync();
         }
