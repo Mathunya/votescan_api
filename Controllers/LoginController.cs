@@ -2,6 +2,7 @@
 using MySql.Data.MySqlClient;
 using System.Data;
 using Web_Api.Models;
+using Web_Api.Services;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.IdentityModel.Tokens.Jwt;
@@ -19,11 +20,13 @@ public class LoginController : ControllerBase{
     private string? _connect;
     private User user;
     private readonly IHubContext<SessionHub>? _hubContext;
+    private readonly WelcomeService _welcome;
 
-    public LoginController(IConfiguration configuration,IHubContext<SessionHub> hubContext, ILogger<LoginController> logger)
+    public LoginController(IConfiguration configuration,IHubContext<SessionHub> hubContext, ILogger<LoginController> logger, WelcomeService welcome)
     {
         _config = configuration;
         _logger = logger;
+        _welcome = welcome;
         _connect = _config.GetConnectionString("ConsString");
         _hubContext = hubContext ?? throw new ArgumentNullException(nameof(hubContext));
         user=new User();
@@ -73,9 +76,10 @@ public class LoginController : ControllerBase{
         {
             try
             {
-                await SaveAppVersionAsync(user.Cell, request.appVersion.Value);
+                // Also triggers the one-off welcome message the first time this user reports.
+                await _welcome.ReportAppVersionAsync(user.Cell, request.appVersion.Value);
             }
-            catch (MySqlException ex)
+            catch (Exception ex)
             {
                 // Best-effort telemetry — never block a login over this.
                 _logger.LogWarning(ex, "Unable to save app version for user {Cell}", user.Cell);
@@ -169,20 +173,6 @@ public class LoginController : ControllerBase{
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private async Task SaveAppVersionAsync(string userId, int appVersion)
-    {
-        using var con = new MySqlConnection(_connect);
-        await con.OpenAsync();
-
-        var cmd = new MySqlCommand(@"
-            UPDATE Users SET AppVersion = @appVersion WHERE Cell = @userId
-        ", con);
-
-        cmd.Parameters.AddWithValue("@appVersion", appVersion);
-        cmd.Parameters.AddWithValue("@userId", userId);
-
-        await cmd.ExecuteNonQueryAsync();
-    }
 
     private static bool IsDatabaseUnavailable(MySqlException ex)
     {

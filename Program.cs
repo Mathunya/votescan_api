@@ -70,6 +70,7 @@ builder.Services.AddScoped<BroadcastStore>();
 builder.Services.AddScoped<ChatStore>();
 builder.Services.AddScoped<ImageQuotaService>();
 builder.Services.AddScoped<PresenceStore>();
+builder.Services.AddScoped<WelcomeService>();
 
 var app = builder.Build();
 app.UseCors("corspolicy");
