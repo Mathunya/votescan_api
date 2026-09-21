@@ -13,10 +13,12 @@ public class PresenceStore
     public static readonly TimeSpan OnlineWindow = TimeSpan.FromMinutes(2);
 
     private readonly string _connect;
+    private readonly ILogger<PresenceStore> _logger;
 
-    public PresenceStore(IConfiguration config)
+    public PresenceStore(IConfiguration config, ILogger<PresenceStore> logger)
     {
         _connect = config.GetConnectionString("ConsString")!;
+        _logger = logger;
     }
 
     public async Task MarkSeenAsync(string cell)
@@ -29,6 +31,28 @@ public class PresenceStore
             ON DUPLICATE KEY UPDATE LastSeen = UTC_TIMESTAMP()", con);
         cmd.Parameters.AddWithValue("@cell", cell);
         await cmd.ExecuteNonQueryAsync();
+
+        // Usage stats — one row per user per SAST day (DAU/WAU, minutes in app). Best-effort:
+        // never let this break presence.
+        try
+        {
+            // Heartbeats only ticks up if the previous beat was >=45s ago, so the
+            // login/foreground calls landing next to a 60s interval beat don't double count.
+            // MariaDB evaluates the ON DUPLICATE KEY assignments left to right, so Heartbeats
+            // must be listed before LastSeen or it would see the already-updated LastSeen.
+            using var daily = new MySqlCommand(@"
+                INSERT INTO UserDailyActivity (Cell, ActivityDate, FirstSeen, LastSeen, Heartbeats)
+                VALUES (@cell, DATE(UTC_TIMESTAMP() + INTERVAL 2 HOUR), UTC_TIMESTAMP(), UTC_TIMESTAMP(), 1)
+                ON DUPLICATE KEY UPDATE
+                    Heartbeats = Heartbeats + (TIMESTAMPDIFF(SECOND, LastSeen, UTC_TIMESTAMP()) >= 45),
+                    LastSeen = UTC_TIMESTAMP()", con);
+            daily.Parameters.AddWithValue("@cell", cell);
+            await daily.ExecuteNonQueryAsync();
+        }
+        catch (MySqlException ex)
+        {
+            _logger.LogWarning(ex, "Unable to record daily activity for {Cell}", cell);
+        }
     }
 
     public class PresenceInfo
