@@ -1023,9 +1023,10 @@ public class RecordedVotersController : ControllerBase
     // IN-clause matching would silently miss people. The caller normalizes both sides to a
     // last-9-digits key instead (see FrontDesk /RecordedVoters/reports for the same convention).
     // Timeframe keys mirror getRecordedVoters' getbytimeframe branch (today/yesterday/3days/week/
-    // 2weeks/30days/90days, default 30days) so this stays consistent with the rest of the app.
-    // Note there's no upper bound on the range (WHERE date >= @rangeStart below), so "yesterday"
-    // here means "since yesterday" rather than a strict single calendar day.
+    // 2weeks/30days/90days, default 30days) so this stays consistent with the rest of the app,
+    // plus "alltime" for no lower bound. Note there's no upper bound on the range
+    // (WHERE date >= @rangeStart below), so "yesterday" here means "since yesterday" rather than
+    // a strict single calendar day.
     [HttpGet]
     [Route("canvassingtotalsbyvolunteer/{timeframe}")]
     public IActionResult CanvassingTotalsByVolunteer(string timeframe)
@@ -1039,6 +1040,10 @@ public class RecordedVotersController : ControllerBase
             "2weeks" => DateTime.Today.AddDays(-14),
             "30days" => DateTime.Today.AddDays(-30),
             "90days" => DateTime.Today.AddDays(-90),
+            // Year 2000 rather than DateTime.MinValue: MySQL's DATETIME range starts at
+            // 1000-01-01, but .NET's DateTime.MinValue (0001-01-01) is outside it and would throw
+            // when bound as a MySqlCommand parameter. Anything canvassed predates this by years.
+            "alltime" => new DateTime(2000, 1, 1),
             _ => DateTime.Today.AddDays(-30),
         };
 
