@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Web_Api.Models
 {
     public class User
@@ -14,6 +16,8 @@ namespace Web_Api.Models
         {
             get; set;
         }
+        // Omitted from responses when not set, so list endpoints never send a "password" key.
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Password
         {
             get; set;

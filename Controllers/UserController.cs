@@ -99,6 +99,8 @@ public class UserController : ControllerBase
                     u.Id = dr["number"].ToString();
                     u.Name = dr["Name"].ToString();
                     u.Surname = dr["Surname"].ToString();
+                    // Still returned here only: the app's Change Password screen and the dashboard's
+                    // Reset User screen read it. Remove once both verify the old password server-side.
                     u.Password = dr["Password"].ToString();
                     u.Cell = dr["Cell"].ToString();
                     u.Ward = dr["Ward"].ToString();
@@ -148,7 +150,6 @@ public class UserController : ControllerBase
                     u.Id = dr["number"].ToString();
                     u.Name = dr["Name"].ToString();
                     u.Surname = dr["Surname"].ToString();
-                    u.Password = dr["Password"].ToString();
                     u.Cell = dr["Cell"].ToString();
                     u.Ward = dr["Ward"].ToString();
                     u.Voting_Station = dr["Voting_Station"].ToString();
@@ -199,7 +200,6 @@ public class UserController : ControllerBase
                     u.Id = dr["number"].ToString();
                     u.Name = dr["Name"].ToString();
                     u.Surname = dr["Surname"].ToString();
-                    u.Password = dr["Password"].ToString();
                     u.Cell = dr["Cell"].ToString();
                     u.Ward = dr["Ward"].ToString();
                     u.Voting_Station = dr["Voting_Station"].ToString();
@@ -249,7 +249,6 @@ public class UserController : ControllerBase
                     u.Id = dr["number"].ToString();
                     u.Name = dr["Name"].ToString();
                     u.Surname = dr["Surname"].ToString();
-                    u.Password = dr["Password"].ToString();
                     u.Cell = dr["Cell"].ToString();
                     u.Ward = dr["Ward"].ToString();
                     u.Voting_Station = dr["Voting_Station"].ToString();
@@ -299,7 +298,6 @@ public class UserController : ControllerBase
                     u.Id = dr["number"].ToString();
                     u.Name = dr["Name"].ToString();
                     u.Surname = dr["Surname"].ToString();
-                    u.Password = dr["Password"].ToString();
                     u.Cell = dr["Cell"].ToString();
                     u.Ward = dr["Ward"].ToString();
                     u.Voting_Station = dr["Voting_Station"].ToString();
@@ -423,7 +421,6 @@ public class UserController : ControllerBase
                     u.Id = dr["number"].ToString();
                     u.Name = dr["Name"].ToString();
                     u.Surname = dr["Surname"].ToString();
-                    u.Password = dr["Password"].ToString();
                     u.Cell = dr["Cell"].ToString();
                     u.Ward = dr["Ward"].ToString();
                     u.Voting_Station = dr["Voting_Station"].ToString();
