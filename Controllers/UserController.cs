@@ -553,6 +553,65 @@ public class UserController : ControllerBase
         return retCode;
 
     }
+    // Server-side old-password check for the app's Change Password screen, which used to fetch
+    // the stored password via getbycell and compare it on the phone. BINARY so the check stays
+    // case-sensitive like that client-side comparison (the column collation is _ci).
+    [HttpPost]
+    [Route("verifypassword")]
+    public async Task<IActionResult> VerifyPassword([FromBody] PasswordCheckRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req?.Cell) || string.IsNullOrEmpty(req.Password))
+            return BadRequest("Cell and password required");
+
+        return Ok(new { valid = await PasswordMatchesAsync(req.Cell.Trim(), req.Password.Trim()) });
+    }
+
+    // Change a password only if the old one matches. Returns rows updated (0 = wrong old password),
+    // same int convention as updatePassword. updatePassword (PUT /User) stays for older app builds.
+    [HttpPost]
+    [Route("changepassword")]
+    public async Task<IActionResult> ChangePassword([FromBody] PasswordChangeRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req?.Cell) || string.IsNullOrEmpty(req.OldPassword)
+            || string.IsNullOrWhiteSpace(req.NewPassword))
+            return BadRequest("Cell, old password and new password required");
+
+        using var con = new MySqlConnection(connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(@"
+            UPDATE Users SET Password = @newPassword
+            WHERE Cell = @cell AND BINARY Password = BINARY @oldPassword", con);
+        cmd.Parameters.AddWithValue("@cell", req.Cell.Trim());
+        cmd.Parameters.AddWithValue("@oldPassword", req.OldPassword.Trim());
+        cmd.Parameters.AddWithValue("@newPassword", req.NewPassword.Trim());
+        return Ok(await cmd.ExecuteNonQueryAsync());
+    }
+
+    private async Task<bool> PasswordMatchesAsync(string cell, string password)
+    {
+        using var con = new MySqlConnection(connect);
+        await con.OpenAsync();
+        using var cmd = new MySqlCommand(@"
+            SELECT COUNT(*) FROM Users
+            WHERE Cell = @cell AND BINARY Password = BINARY @password", con);
+        cmd.Parameters.AddWithValue("@cell", cell);
+        cmd.Parameters.AddWithValue("@password", password);
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync()) > 0;
+    }
+
+    public class PasswordCheckRequest
+    {
+        public string? Cell { get; set; }
+        public string? Password { get; set; }
+    }
+
+    public class PasswordChangeRequest
+    {
+        public string? Cell { get; set; }
+        public string? OldPassword { get; set; }
+        public string? NewPassword { get; set; }
+    }
+
     [HttpPut]
     [Route("UpdateUser")]  
     public async Task<int> UpdateUser(User user){
