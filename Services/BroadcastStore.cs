@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using MySql.Data.MySqlClient;
 
 namespace Web_Api.Services;
@@ -18,6 +19,10 @@ public class BroadcastListItem
     public string? SenderRegion { get; set; }
     public string? SenderMunicipality { get; set; }
     public string? SenderWard { get; set; }
+    // Reach stats for this broadcast, the same for every reader (shown as Sent / Received / Read).
+    public int SentCount { get; set; }
+    public int ReceivedCount { get; set; }
+    public int ReadCount { get; set; }
 }
 
 // Plain parameterized SQL against Broadcasts/BroadcastReceipts — follows the precedent set by
@@ -219,7 +224,92 @@ public class BroadcastStore
                 SenderWard = dr["SenderWard"] is DBNull ? null : dr["SenderWard"].ToString()
             });
         }
+
+        // The reader must be closed before this connection runs the follow-up queries below.
+        await dr.CloseAsync();
+
+        if (results.Count > 0)
+        {
+            var ids = results.Select(r => r.Id).ToList();
+            await MarkDeliveredAsync(con, userNumber, ids);
+            var stats = await GetReachStatsAsync(con, ids);
+            foreach (var r in results)
+            {
+                if (!stats.TryGetValue(r.Id, out var st)) continue;
+                r.SentCount = st.Sent;
+                r.ReceivedCount = st.Received;
+                r.ReadCount = st.Read;
+            }
+        }
         return results;
+    }
+
+    // "Received" = the recipient's app has loaded the broadcast. Nothing recorded this before, so
+    // stamp DeliveredAt the first time a receipt is returned in the recipient's inbox. Best-effort:
+    // a failed write (e.g. a read-only replica) must never break loading the inbox.
+    private static async Task MarkDeliveredAsync(MySqlConnection con, int userNumber, List<int> ids)
+    {
+        try
+        {
+            using var cmd = new MySqlCommand($@"
+                UPDATE BroadcastReceipts SET DeliveredAt = UTC_TIMESTAMP()
+                WHERE RecipientId = @u AND DeliveredAt IS NULL
+                  AND BroadcastId IN ({string.Join(",", ids.Select((_, i) => "@b" + i))})", con);
+            cmd.Parameters.AddWithValue("@u", userNumber);
+            for (int i = 0; i < ids.Count; i++) cmd.Parameters.AddWithValue("@b" + i, ids[i]);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        catch (MySqlException)
+        {
+            // stats just lag until the next successful load
+        }
+    }
+
+    // Per-broadcast counts are the same for every reader, and computing them scans every receipt
+    // of the broadcast (~12,000 rows for an "everyone" one), so they are cached per node for 60s
+    // rather than recomputed on each user's inbox load. "Received" counts DeliveredAt OR ReadAt,
+    // because a read receipt is necessarily a received one (older broadcasts have ReadAt only).
+    private static readonly TimeSpan StatsTtl = TimeSpan.FromSeconds(60);
+    private static readonly ConcurrentDictionary<int, (int Sent, int Received, int Read, DateTime At)> StatsCache = new();
+    private static readonly SemaphoreSlim StatsLock = new(1, 1);
+
+    private static async Task<Dictionary<int, (int Sent, int Received, int Read)>> GetReachStatsAsync(
+        MySqlConnection con, List<int> ids)
+    {
+        var now = DateTime.UtcNow;
+        var stale = ids.Where(id => !StatsCache.TryGetValue(id, out var c) || now - c.At > StatsTtl).ToList();
+        if (stale.Count > 0)
+        {
+            await StatsLock.WaitAsync();
+            try
+            {
+                using var cmd = new MySqlCommand($@"
+                    SELECT BroadcastId, COUNT(*) AS Sent,
+                           SUM(DeliveredAt IS NOT NULL OR ReadAt IS NOT NULL) AS Received,
+                           SUM(ReadAt IS NOT NULL) AS ReadCount
+                    FROM BroadcastReceipts
+                    WHERE BroadcastId IN ({string.Join(",", stale.Select((_, i) => "@s" + i))})
+                    GROUP BY BroadcastId", con);
+                for (int i = 0; i < stale.Count; i++) cmd.Parameters.AddWithValue("@s" + i, stale[i]);
+                using var dr = await cmd.ExecuteReaderAsync();
+                while (await dr.ReadAsync())
+                {
+                    StatsCache[Convert.ToInt32(dr["BroadcastId"])] = (
+                        Convert.ToInt32(dr["Sent"]), Convert.ToInt32(dr["Received"]),
+                        Convert.ToInt32(dr["ReadCount"]), DateTime.UtcNow);
+                }
+            }
+            catch (MySqlException)
+            {
+                // keep serving whatever is cached (or zeros) — stats are decoration, not the inbox
+            }
+            finally { StatsLock.Release(); }
+        }
+
+        var result = new Dictionary<int, (int Sent, int Received, int Read)>();
+        foreach (var id in ids)
+            if (StatsCache.TryGetValue(id, out var c)) result[id] = (c.Sent, c.Received, c.Read);
+        return result;
     }
 
     // Only the recipient themself can mark their own receipt read (RecipientId is matched, not
@@ -229,7 +319,7 @@ public class BroadcastStore
         using var con = new MySqlConnection(_connect);
         await con.OpenAsync();
         using var cmd = new MySqlCommand(
-            "UPDATE BroadcastReceipts SET ReadAt = NOW() WHERE BroadcastId = @b AND RecipientId = @u AND ReadAt IS NULL",
+            "UPDATE BroadcastReceipts SET ReadAt = UTC_TIMESTAMP() WHERE BroadcastId = @b AND RecipientId = @u AND ReadAt IS NULL",
             con);
         cmd.Parameters.AddWithValue("@b", broadcastId);
         cmd.Parameters.AddWithValue("@u", userNumber);

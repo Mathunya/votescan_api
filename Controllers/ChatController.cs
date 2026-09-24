@@ -26,16 +26,21 @@ public class ChatController : ControllerBase
     private readonly IHubContext<SessionHub> _hubContext;
     private readonly ImageQuotaService _imageQuota;
     private readonly PushNotificationService _push;
+    private readonly WelcomeService _welcome;
+    private readonly ILogger<ChatController> _logger;
 
     public ChatController(
         ChatStore store, BroadcastScopeResolver resolver, IHubContext<SessionHub> hubContext,
-        ImageQuotaService imageQuota, PushNotificationService push)
+        ImageQuotaService imageQuota, PushNotificationService push, WelcomeService welcome,
+        ILogger<ChatController> logger)
     {
         _store = store;
         _resolver = resolver;
         _hubContext = hubContext;
         _imageQuota = imageQuota;
         _push = push;
+        _welcome = welcome;
+        _logger = logger;
     }
 
     private Task<int?> MeAsync() => _resolver.ResolveSenderNumberAsync(User.FindFirst("Cell")?.Value);
@@ -95,6 +100,16 @@ public class ChatController : ControllerBase
         var sentAt = DateTime.UtcNow;
 
         var otherId = await _store.GetOtherParticipantAsync(conversationId, me.Value);
+
+        // Messages to the unmonitored Votescan Team account get a canned "not monitored" reply
+        // (at most once an hour per conversation) instead of a push/live event to nobody.
+        if (otherId is not null && otherId == await _welcome.GetSystemNumberAsync())
+        {
+            try { await _welcome.MaybeAutoReplyAsync(conversationId, me.Value); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Auto-reply failed for conversation {Conversation}", conversationId); }
+            return Ok(new { id = messageId, conversationId, sentAt, hasImage = image is not null });
+        }
+
         if (otherId is not null)
         {
             var cells = await _resolver.ResolveCellsAsync(new[] { otherId.Value });

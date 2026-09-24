@@ -49,6 +49,7 @@ public class ElectionsController : ControllerBase
                     e.end_date = dr["end_date"].ToString();
                     e.status = dr["status"].ToString();
                     e.Ward = dr["Ward"].ToString();
+                    e.ProclaimedDate = dr["ProclaimedDate"] == DBNull.Value ? null : dr["ProclaimedDate"].ToString();
                     //
                     all.Add(e);
                 }
@@ -91,6 +92,7 @@ public class ElectionsController : ControllerBase
                     e.end_date = dr["end_date"].ToString();
                     e.status = dr["status"].ToString();
                     e.Ward = dr["Ward"].ToString();
+                    e.ProclaimedDate = dr["ProclaimedDate"] == DBNull.Value ? null : dr["ProclaimedDate"].ToString();
                     //
                     all.Add(e);
                 }
@@ -133,6 +135,7 @@ public class ElectionsController : ControllerBase
                     e.end_date = dr["end_date"].ToString();
                     e.status = dr["status"].ToString();
                     e.Ward = dr["Ward"].ToString();
+                    e.ProclaimedDate = dr["ProclaimedDate"] == DBNull.Value ? null : dr["ProclaimedDate"].ToString();
                     //
                     all.Add(e);
                 }
@@ -174,6 +177,7 @@ public class ElectionsController : ControllerBase
                     e.end_date = dr["end_date"].ToString();
                     e.status = dr["status"].ToString();
                     e.Ward = dr["Ward"].ToString();
+                    e.ProclaimedDate = dr["ProclaimedDate"] == DBNull.Value ? null : dr["ProclaimedDate"].ToString();
                     //
                     all.Add(e);
                 }
