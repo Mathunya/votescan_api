@@ -91,11 +91,13 @@ public class MessagingController : ControllerBase
         if (senderId is null)
             return Unauthorized("Could not resolve sender.");
 
-        if (image is not null && !await _imageQuota.CanSendImageAsync(senderId.Value))
-            return BadRequest($"You've reached today's limit of {ImageQuotaService.MaxImagesPerDay} images. Try again after midnight.");
-
         var role = User.FindFirst("Role")?.Value ?? "";
         var isSuperUser = string.Equals(role, "super user", StringComparison.OrdinalIgnoreCase);
+
+        // super user is exempt from the daily image cap, same as the approval gate below
+        // (e.g. sending each ward its own candidate card in one run).
+        if (image is not null && !isSuperUser && !await _imageQuota.CanSendImageAsync(senderId.Value))
+            return BadRequest($"You've reached today's limit of {ImageQuotaService.MaxImagesPerDay} images. Try again after midnight.");
         var needsApproval = !isSuperUser && scope.RecipientIds.Count > ApprovalRecipientThreshold;
 
         if (needsApproval)
