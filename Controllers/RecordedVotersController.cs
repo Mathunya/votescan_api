@@ -941,6 +941,55 @@ public class RecordedVotersController : ControllerBase
         }
         return all.ToArray();
     }
+    // Same scope hierarchy as getbytimeframe above, but canvassing is restricted to
+    // records whose volunteer cell number matches a Users row with the given role
+    // (e.g. "Youth League") — powers the Youth League dashboard's member-specific
+    // totals rather than "everyone who canvassed in this area". The role value is
+    // passed into the stored procedure through the existing @attitude parameter slot
+    // (see the 'getbytimeframebyrole' branch in getRecordedVoters) rather than adding
+    // a new SP parameter, since every other call site would otherwise need updating
+    // in AddMissingGetRecordedVotersParameters below.
+    [HttpGet]
+    [Route("getbytimeframebyrole/{municipality}/{timeframe}/{role}")]
+    public IEnumerable<RecordedVoters> getbytimeframebyrole(string municipality, string timeframe, string role)
+    {
+        List<RecordedVoters> all = new List<RecordedVoters>();
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("getRecordedVoters", con))
+            {
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.Parameters.AddWithValue("@municipality", municipality);
+                cmd.Parameters.AddWithValue("@timeframe", timeframe);
+                cmd.Parameters.AddWithValue("@attitude", role);
+                cmd.Parameters.AddWithValue("@selector", "getbytimeframebyrole");
+
+                AddMissingGetRecordedVotersParameters(cmd);
+
+                cmd.AddMissingStoredProcedureParameters();
+
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        v = new RecordedVoters();
+                        v.province = dr["province"].ToString();
+                        v.municipality = dr["municipality"].ToString();
+                        v.ward = dr["ward"].ToString();
+                        v.id = dr["canvassed"].ToString();
+                        v.date = dr["range_start"].ToString();
+                        all.Add(v);
+                    }
+                    //close connections
+                    dr.Close();
+                    con.Close();
+                }
+            }
+        }
+        return all.ToArray();
+    }
     [HttpGet]
     [Route("getwardlist")]
     public IEnumerable<RecordedVoters> getwardlist()
