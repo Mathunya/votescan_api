@@ -25,6 +25,10 @@ public class ChatMessageItem
     public DateTime SentAt { get; set; }
     public bool IsMine { get; set; }
     public bool HasImage { get; set; }
+    // Set when the attachment is a document rather than a photo (e.g. "application/pdf" for the
+    // weekly team report sent by the Votescan Team account).
+    public string? MimeType { get; set; }
+    public string? AttachmentName { get; set; }
 }
 
 // Plain parameterized SQL against Conversations/ChatMessages — same precedent as
@@ -169,7 +173,7 @@ public class ChatStore
         // Deliberately not selecting Image here — the thread list stays lightweight, images are
         // fetched separately via GetMessageImageAsync only when a bubble actually needs to render one.
         using var cmd = new MySqlCommand(
-            "SELECT Id, SenderId, Body, SentAt, Image IS NOT NULL AS HasImage FROM ChatMessages WHERE ConversationId = @id ORDER BY SentAt ASC", con);
+            "SELECT Id, SenderId, Body, SentAt, Image IS NOT NULL AS HasImage, ImageMimeType, AttachmentName FROM ChatMessages WHERE ConversationId = @id ORDER BY SentAt ASC", con);
         cmd.Parameters.AddWithValue("@id", conversationId);
 
         var results = new List<ChatMessageItem>();
@@ -184,24 +188,27 @@ public class ChatStore
                 Body = dr["Body"].ToString() ?? "",
                 SentAt = AsUtc(dr["SentAt"]),
                 IsMine = senderId == me,
-                HasImage = Convert.ToBoolean(dr["HasImage"])
+                HasImage = Convert.ToBoolean(dr["HasImage"]),
+                MimeType = dr["ImageMimeType"] as string,
+                AttachmentName = dr["AttachmentName"] as string
             });
         }
         return results;
     }
 
-    public async Task<long> InsertMessageAsync(int conversationId, int senderId, string body, byte[]? image = null, string? imageMimeType = null)
+    public async Task<long> InsertMessageAsync(int conversationId, int senderId, string body, byte[]? image = null, string? imageMimeType = null, string? attachmentName = null)
     {
         using var con = new MySqlConnection(_connect);
         await con.OpenAsync();
         using var cmd = new MySqlCommand(@"
-            INSERT INTO ChatMessages (ConversationId, SenderId, Body, Image, ImageMimeType) VALUES (@c, @s, @b, @img, @mime);
+            INSERT INTO ChatMessages (ConversationId, SenderId, Body, Image, ImageMimeType, AttachmentName) VALUES (@c, @s, @b, @img, @mime, @name);
             SELECT LAST_INSERT_ID();", con);
         cmd.Parameters.AddWithValue("@c", conversationId);
         cmd.Parameters.AddWithValue("@s", senderId);
         cmd.Parameters.AddWithValue("@b", body);
         cmd.Parameters.AddWithValue("@img", (object?)image ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@mime", (object?)imageMimeType ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@name", (object?)attachmentName ?? DBNull.Value);
         return Convert.ToInt64(await cmd.ExecuteScalarAsync());
     }
 

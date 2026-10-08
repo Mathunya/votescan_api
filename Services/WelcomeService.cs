@@ -162,6 +162,21 @@ public class WelcomeService
         }
     }
 
+    // Drops a one-off message from the Votescan Team account into a user's inbox (used by Frappe for
+    // coordinator audit confirmations and nominations). Returns false if either account is missing.
+    public async Task<bool> SendSystemMessageAsync(string cell, string text, byte[]? image = null, string? imageMimeType = null, string? attachmentName = null)
+    {
+        if (string.IsNullOrWhiteSpace(cell) || cell == SystemCell) return false;
+        var system = await GetSystemNumberAsync();
+        if (system is null) return false;
+        var me = await _resolver.ResolveSenderNumberAsync(cell);
+        if (me is null || me.Value == system.Value) return false;
+        var conversationId = await _store.GetOrCreateConversationAsync(system.Value, me.Value);
+        var messageId = await _store.InsertMessageAsync(conversationId, system.Value, text, image, imageMimeType, attachmentName);
+        await NotifyAsync(cell, messageId, conversationId, system.Value, text, image is not null, imageMimeType, attachmentName);
+        return true;
+    }
+
     // Called after a user sends a message into a conversation with the Votescan Team account.
     public async Task MaybeAutoReplyAsync(int conversationId, int userNumber)
     {
@@ -188,9 +203,10 @@ public class WelcomeService
     }
 
     // Same live event the chat controller raises, so an open app shows the message immediately.
-    private Task NotifyAsync(string cell, long messageId, int conversationId, int senderId, string body)
+    private Task NotifyAsync(string cell, long messageId, int conversationId, int senderId, string body, bool hasImage = false,
+        string? mimeType = null, string? attachmentName = null)
     {
-        var payload = new { id = messageId, conversationId, senderId, body, sentAt = DateTime.UtcNow, hasImage = false };
+        var payload = new { id = messageId, conversationId, senderId, body, sentAt = DateTime.UtcNow, hasImage, mimeType, attachmentName };
         return _hub.Clients.Group(cell).SendAsync("NewChatMessage", payload);
     }
 }
