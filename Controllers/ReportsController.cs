@@ -391,9 +391,12 @@ public class ReportsController : ControllerBase
         return all.ToArray();
     }
 
+    // The *byscope endpoints below take an optional `role` (e.g. "Youth League"):
+    // when set, getReports counts only canvassing by volunteers whose cell number
+    // matches a Users row with that role. Targets/registered voters stay unfiltered.
     [HttpGet]
     [Route("getprovincialnumbersbyscope")]
-    public IEnumerable<Report> getprovincialnumbersbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
+    public IEnumerable<Report> getprovincialnumbersbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd, [FromQuery] string? role)
     {
         MySqlDataReader dr;
         List<Report> all = new List<Report>();
@@ -409,6 +412,7 @@ public class ReportsController : ControllerBase
                 cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@role", (object?)role ?? DBNull.Value);
                 cmd.AddMissingStoredProcedureParameters();
 
                 dr = cmd.ExecuteReader();
@@ -432,9 +436,157 @@ public class ReportsController : ControllerBase
         return all.ToArray();
     }
 
+    // Daily canvassing counts per municipality / ward / VD from `from` (yyyy-MM-dd)
+    // to today, for the dashboard's daily movement table. `municipalities` is a
+    // comma-separated list of RecordedVoters.municipality codes (e.g.
+    // "MAN - Mangaung" or "FS194 - Maluti a Phofung,FS192 - Dihlabeng"); the
+    // frontend rolls VDs up into wards, clusters, zones and regions itself.
+    [HttpGet]
+    [Route("getdailycanvassing")]
+    public IEnumerable<DailyCanvassing> getdailycanvassing([FromQuery] string? municipalities, [FromQuery] string? from)
+    {
+        List<DailyCanvassing> all = new List<DailyCanvassing>();
+
+        var codes = (municipalities ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct()
+            .Take(20)
+            .ToList();
+        if (codes.Count == 0)
+        {
+            return all;
+        }
+
+        // Default to the last 7 days; never look back more than 31 days.
+        DateTime start = DateTime.TryParse(from, out var parsed) ? parsed.Date : DateTime.Today.AddDays(-6);
+        if (start < DateTime.Today.AddDays(-31))
+        {
+            start = DateTime.Today.AddDays(-31);
+        }
+
+        var names = codes.Select((_, i) => "@m" + i).ToList();
+        string sql =
+            "SELECT municipality, ward, voting_district, DATE_FORMAT(`date`, '%Y-%m-%d') AS day, COUNT(names) AS recorded " +
+            "FROM RecordedVoters " +
+            "WHERE municipality IN (" + string.Join(", ", names) + ") AND `date` >= @from " +
+            "GROUP BY municipality, ward, voting_district, DATE_FORMAT(`date`, '%Y-%m-%d')";
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(sql, con))
+            {
+                cmd.CommandType = CommandType.Text;
+                for (int i = 0; i < codes.Count; i++)
+                {
+                    cmd.Parameters.AddWithValue(names[i], codes[i]);
+                }
+                cmd.Parameters.AddWithValue("@from", start);
+
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        all.Add(new DailyCanvassing
+                        {
+                            Municipality = dr["municipality"].ToString(),
+                            Ward = dr["ward"].ToString(),
+                            Vd = dr["voting_district"].ToString(),
+                            Day = dr["day"].ToString(),
+                            Recorded = Convert.ToInt32(dr["recorded"]),
+                        });
+                    }
+                }
+                con.Close();
+            }
+        }
+
+        return all.ToArray();
+    }
+
+    // Every ward and VD on the voters' roll (AllVoters) for the given
+    // municipalities, with the VD name — so the dashboard's Movement Report can
+    // list areas with no canvassing yet. Same comma-separated `municipalities`
+    // format as getdailycanvassing.
+    [HttpGet]
+    [Route("getvdroll")]
+    public IEnumerable<DailyCanvassing> getvdroll([FromQuery] string? municipalities)
+    {
+        List<DailyCanvassing> all = new List<DailyCanvassing>();
+
+        var codes = (municipalities ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct()
+            .Take(20)
+            .ToList();
+        if (codes.Count == 0)
+        {
+            return all;
+        }
+
+        foreach (var code in codes)
+        {
+            all.AddRange(VdRollFor(code));
+        }
+        return all.ToArray();
+    }
+
+    // The roll barely changes, so each municipality's list is cached for 6 hours.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, List<DailyCanvassing> Rows)> vdRollCache = new();
+
+    private List<DailyCanvassing> VdRollFor(string code)
+    {
+        if (vdRollCache.TryGetValue(code, out var hit) && hit.At > DateTime.UtcNow.AddHours(-6))
+        {
+            return hit.Rows;
+        }
+
+        // Filter on the ward-code prefix (indexed WardID) rather than the
+        // Municipality column — ~7x faster on AllVoters. "FS194 - ..." -> "41904",
+        // "MAN - Mangaung" -> "49400" (same prefix rule as the ward codes).
+        string digits = new string(code.TakeWhile(c => c != ' ').Where(char.IsDigit).ToArray());
+        string prefix = code.StartsWith("MAN", StringComparison.OrdinalIgnoreCase)
+            ? "49400"
+            : digits.Length == 3 ? "4" + digits.Substring(0, 2) + "0" + digits[2] : "";
+        var rows = new List<DailyCanvassing>();
+        if (prefix == "")
+        {
+            return rows;
+        }
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(
+                "SELECT WardID, VDNumber, MAX(VDName) AS VDName FROM AllVoters " +
+                "WHERE WardID LIKE @prefix GROUP BY WardID, VDNumber", con))
+            {
+                cmd.CommandType = CommandType.Text;
+                cmd.Parameters.AddWithValue("@prefix", prefix + "%");
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        rows.Add(new DailyCanvassing
+                        {
+                            Municipality = code,
+                            Ward = dr["WardID"].ToString(),
+                            Vd = dr["VDNumber"].ToString(),
+                            Name = dr["VDName"].ToString(),
+                        });
+                    }
+                }
+                con.Close();
+            }
+        }
+
+        vdRollCache[code] = (DateTime.UtcNow, rows);
+        return rows;
+    }
+
     [HttpGet]
     [Route("getprovincialstatsbyscope")]
-    public IEnumerable<Report> getprovincialstatsbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
+    public IEnumerable<Report> getprovincialstatsbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd, [FromQuery] string? role)
     {
         MySqlDataReader dr;
         List<Report> all = new List<Report>();
@@ -450,6 +602,7 @@ public class ReportsController : ControllerBase
                 cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@role", (object?)role ?? DBNull.Value);
                 cmd.AddMissingStoredProcedureParameters();
 
                 dr = cmd.ExecuteReader();
@@ -474,7 +627,7 @@ public class ReportsController : ControllerBase
 
     [HttpGet]
     [Route("getprovincialagedemographicsbyscope")]
-    public IEnumerable<AgeDemographics> getprovincialagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
+    public IEnumerable<AgeDemographics> getprovincialagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd, [FromQuery] string? role)
     {
         MySqlDataReader dr;
         AgeDemographics r;
@@ -491,6 +644,7 @@ public class ReportsController : ControllerBase
                 cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@role", (object?)role ?? DBNull.Value);
                 cmd.AddMissingStoredProcedureParameters();
 
                 dr = cmd.ExecuteReader();
@@ -517,7 +671,7 @@ public class ReportsController : ControllerBase
 
     [HttpGet]
     [Route("getmunicipalagedemographicsbyscope")]
-    public IEnumerable<AgeDemographics> getmunicipalagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd)
+    public IEnumerable<AgeDemographics> getmunicipalagedemographicsbyscope([FromQuery] string? region, [FromQuery] string? unit, [FromQuery] string? ward, [FromQuery] string? vd, [FromQuery] string? role)
     {
         MySqlDataReader dr;
         AgeDemographics r;
@@ -534,6 +688,7 @@ public class ReportsController : ControllerBase
                 cmd.Parameters.AddWithValue("@municipality", (object?)unit ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@ward", (object?)ward ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@vd", (object?)vd ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@role", (object?)role ?? DBNull.Value);
                 cmd.AddMissingStoredProcedureParameters();
 
                 dr = cmd.ExecuteReader();
