@@ -71,6 +71,8 @@ builder.Services.AddScoped<ChatStore>();
 builder.Services.AddScoped<ImageQuotaService>();
 builder.Services.AddScoped<PresenceStore>();
 builder.Services.AddScoped<WelcomeService>();
+// reads photographed results slips with Claude vision
+builder.Services.AddSingleton<ResultsSlipReader>();
 
 var app = builder.Build();
 app.UseCors("corspolicy");

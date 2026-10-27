@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using MySql.Data.MySqlClient;
 using System.Data;
 using Web_Api.Models;
+using Web_Api.Services;
 using System.Collections;
 
 namespace Web_Api.Controllers;
@@ -273,4 +274,98 @@ public class ResultsSlipController : ControllerBase
         //   1 = account saved successfully
         return retCode;
     }
+
+    //READ A PHOTOGRAPHED SLIP - returns the VD and each party's votes
+    [HttpPost]
+    [Route("scan")]
+    public async Task<IActionResult> scanSlip(
+        [FromBody] SlipImage slip,
+        [FromServices] ResultsSlipReader reader)
+    {
+        if (string.IsNullOrEmpty(slip.Image))
+        {
+            return BadRequest("No image");
+        }
+        try
+        {
+            var result = await reader.ReadAsync(slip.Image, slip.MediaType ?? "image/jpeg");
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("results slip scan error => " + ex.Message);
+            return StatusCode(502, "Could not read the slip. Please retake the photo.");
+        }
+    }
+
+    //BACKUP COPY OF A SLIP PHOTO - saved on the server beside the captured numbers
+    [HttpPost]
+    [Route("image")]
+    public IActionResult saveImage([FromBody] SlipImage slip)
+    {
+        if (string.IsNullOrEmpty(slip.Image))
+        {
+            return BadRequest("No image");
+        }
+        byte[] bytes;
+        try
+        {
+            bytes = Convert.FromBase64String(slip.Image);
+        }
+        catch (FormatException)
+        {
+            return BadRequest("Image is not valid base64");
+        }
+        Directory.CreateDirectory(ImageFolder());
+        var name = $"{SafeName(slip.VD)}_{SafeName(slip.Election)}_{SafeName(slip.Day)}_" +
+            $"{DateTime.UtcNow:yyyyMMddHHmmss}_{Guid.NewGuid():N}.jpg";
+        System.IO.File.WriteAllBytes(Path.Combine(ImageFolder(), name), bytes);
+        return Ok(new { file = name });
+    }
+
+    //SLIP PHOTOS SAVED FOR A VD, newest first
+    [HttpGet]
+    [Route("images/{vd}")]
+    public IEnumerable<string> getImages(string vd)
+    {
+        if (!Directory.Exists(ImageFolder()))
+        {
+            return Array.Empty<string>();
+        }
+        return Directory.GetFiles(ImageFolder(), $"{SafeName(vd)}_*.jpg")
+            .Select(Path.GetFileName)
+            .OfType<string>()
+            .OrderByDescending(name => name)
+            .ToArray();
+    }
+
+    //ONE SAVED SLIP PHOTO
+    [HttpGet]
+    [Route("imagefile/{name}")]
+    public IActionResult getImageFile(string name)
+    {
+        var path = Path.Combine(ImageFolder(), Path.GetFileName(name));
+        if (!System.IO.File.Exists(path))
+        {
+            return NotFound();
+        }
+        return PhysicalFile(path, "image/jpeg");
+    }
+
+    private string ImageFolder() =>
+        _config?["ResultsSlipImages:Path"]
+        ?? Path.Combine(AppContext.BaseDirectory, "ResultsSlipImages");
+
+    //keeps file names to letters, digits and dashes
+    private static string SafeName(string? value) =>
+        new string((value ?? "none").Select(c => char.IsLetterOrDigit(c) || c == '-' ? c : '-').ToArray());
+}
+
+public class SlipImage
+{
+    public string? Image { get; set; }
+    public string? MediaType { get; set; }
+    public string? VD { get; set; }
+    public string? Election { get; set; }
+    public string? Day { get; set; }
 }
