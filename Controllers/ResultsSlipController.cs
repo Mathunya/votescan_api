@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using MySql.Data.MySqlClient;
 using System.Data;
 using Web_Api.Models;
@@ -279,6 +280,7 @@ public class ResultsSlipController : ControllerBase
     //READ A PHOTOGRAPHED SLIP - returns the VD and each party's votes.
     //Login required and capped per user per day: every scan is a paid Claude call.
     [Authorize]
+    [EnableRateLimiting(RateLimits.SlipScan)]
     [HttpPost]
     [Route("scan")]
     public async Task<IActionResult> scanSlip(
@@ -311,6 +313,7 @@ public class ResultsSlipController : ControllerBase
     //BACKUP COPY OF A SLIP PHOTO - kept in the database so every API node sees it
     //and deploys never remove it
     [Authorize]
+    [EnableRateLimiting(RateLimits.Sensitive)]
     [HttpPost]
     [Route("image")]
     public IActionResult saveImage([FromBody] SlipImage slip)

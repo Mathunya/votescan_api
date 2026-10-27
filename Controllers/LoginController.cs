@@ -8,6 +8,7 @@ using System.Text;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Web_Api.Controllers;
 
@@ -36,6 +37,7 @@ public class LoginController : ControllerBase{
    
     // ✅ POST (secure)
     [HttpPost("login")]
+    [EnableRateLimiting(RateLimits.Login)]
     public async Task<IActionResult> Login([FromBody] Credentials request)
     {
         if (request == null)
@@ -96,6 +98,7 @@ public class LoginController : ControllerBase{
     }
     [HttpGet]
     [Route("getToken/{cell}/{password}")]
+    [EnableRateLimiting(RateLimits.Login)]
     public  async Task<Token> getToken(string cell,string password)
     {
         Token token=new Token();

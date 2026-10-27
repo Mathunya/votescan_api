@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 using Web_Api.Services;
 
@@ -72,6 +73,7 @@ public class MessagingController : ControllerBase
 
     [HttpPost]
     [Route("broadcast")]
+    [EnableRateLimiting(RateLimits.Sensitive)]
     public async Task<IActionResult> Broadcast([FromBody] BroadcastRequest request)
     {
         var (image, imageMimeType, imageError) = ImageQuotaService.DecodeAndValidate(request.ImageBase64, request.ImageMimeType);

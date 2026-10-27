@@ -73,6 +73,7 @@ builder.Services.AddScoped<PresenceStore>();
 builder.Services.AddScoped<WelcomeService>();
 // reads photographed results slips with Claude vision
 builder.Services.AddSingleton<ResultsSlipReader>();
+builder.Services.AddVoteScanRateLimits(builder.Configuration);
 
 var app = builder.Build();
 app.UseCors("corspolicy");
@@ -95,6 +96,8 @@ app.UseHttpsRedirection();
 // silently broken [Authorize] the moment a scheme was registered above.
 app.UseAuthentication();
 app.UseAuthorization();
+// per-user token buckets; after authentication so the user is known
+app.UseVoteScanRateLimits(app.Configuration);
 
 #pragma warning disable ASP0014
 app.UseEndpoints(e => {});
