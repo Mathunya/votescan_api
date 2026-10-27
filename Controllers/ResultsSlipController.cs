@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using MySql.Data.MySqlClient;
 using System.Data;
@@ -275,20 +276,29 @@ public class ResultsSlipController : ControllerBase
         return retCode;
     }
 
-    //READ A PHOTOGRAPHED SLIP - returns the VD and each party's votes
+    //READ A PHOTOGRAPHED SLIP - returns the VD and each party's votes.
+    //Login required and capped per user per day: every scan is a paid Claude call.
+    [Authorize]
     [HttpPost]
     [Route("scan")]
     public async Task<IActionResult> scanSlip(
         [FromBody] SlipImage slip,
         [FromServices] ResultsSlipReader reader)
     {
-        if (string.IsNullOrEmpty(slip.Image))
+        var (bytes, mimeType, error) = ImageQuotaService.DecodeAndValidate(slip.Image, slip.MediaType);
+        if (error != null || bytes == null || mimeType == null)
         {
-            return BadRequest("No image");
+            return BadRequest(error ?? "No image");
         }
+        var cell = User.FindFirst("Cell")?.Value ?? "";
+        if (CountScansToday(cell) >= MaxScansPerDay())
+        {
+            return StatusCode(429, $"Daily limit of {MaxScansPerDay()} slip scans reached.");
+        }
+        LogScan(cell);
         try
         {
-            var result = await reader.ReadAsync(slip.Image, slip.MediaType ?? "image/jpeg");
+            var result = await reader.ReadAsync(Convert.ToBase64String(bytes), mimeType);
             return Ok(result);
         }
         catch (Exception ex)
@@ -298,67 +308,133 @@ public class ResultsSlipController : ControllerBase
         }
     }
 
-    //BACKUP COPY OF A SLIP PHOTO - saved on the server beside the captured numbers
+    //BACKUP COPY OF A SLIP PHOTO - kept in the database so every API node sees it
+    //and deploys never remove it
+    [Authorize]
     [HttpPost]
     [Route("image")]
     public IActionResult saveImage([FromBody] SlipImage slip)
     {
-        if (string.IsNullOrEmpty(slip.Image))
+        var (bytes, mimeType, error) = ImageQuotaService.DecodeAndValidate(slip.Image, slip.MediaType);
+        if (error != null || bytes == null || mimeType == null)
         {
-            return BadRequest("No image");
+            return BadRequest(error ?? "No image");
         }
-        byte[] bytes;
-        try
+        if (string.IsNullOrEmpty(slip.VD))
         {
-            bytes = Convert.FromBase64String(slip.Image);
+            return BadRequest("No VD");
         }
-        catch (FormatException)
+        long id;
+        using (MySqlConnection con = new MySqlConnection(connect))
         {
-            return BadRequest("Image is not valid base64");
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                INSERT INTO ResultsSlipImages (VD, Election, Day, Image, ImageMimeType, UploadedBy)
+                VALUES (@VD, @Election, @Day, @Image, @ImageMimeType, @UploadedBy);
+                SELECT LAST_INSERT_ID();", con))
+            {
+                cmd.Parameters.AddWithValue("@VD", slip.VD);
+                cmd.Parameters.AddWithValue("@Election", slip.Election ?? "");
+                cmd.Parameters.AddWithValue("@Day", slip.Day ?? "");
+                cmd.Parameters.AddWithValue("@Image", bytes);
+                cmd.Parameters.AddWithValue("@ImageMimeType", mimeType);
+                cmd.Parameters.AddWithValue("@UploadedBy", User.FindFirst("Cell")?.Value ?? "");
+                id = Convert.ToInt64(cmd.ExecuteScalar());
+            }
         }
-        Directory.CreateDirectory(ImageFolder());
-        var name = $"{SafeName(slip.VD)}_{SafeName(slip.Election)}_{SafeName(slip.Day)}_" +
-            $"{DateTime.UtcNow:yyyyMMddHHmmss}_{Guid.NewGuid():N}.jpg";
-        System.IO.File.WriteAllBytes(Path.Combine(ImageFolder(), name), bytes);
-        return Ok(new { file = name });
+        return Ok(new { id });
     }
 
-    //SLIP PHOTOS SAVED FOR A VD, newest first
+    //SLIP PHOTOS SAVED FOR A VD, newest first (details only, no image data)
+    [Authorize]
     [HttpGet]
     [Route("images/{vd}")]
-    public IEnumerable<string> getImages(string vd)
+    public IActionResult getImages(string vd)
     {
-        if (!Directory.Exists(ImageFolder()))
+        var all = new List<object>();
+        using (MySqlConnection con = new MySqlConnection(connect))
         {
-            return Array.Empty<string>();
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT Id, VD, Election, Day, UploadedBy, CreatedAt FROM ResultsSlipImages
+                WHERE VD = @VD ORDER BY CreatedAt DESC", con))
+            {
+                cmd.Parameters.AddWithValue("@VD", vd);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        all.Add(new
+                        {
+                            id = Convert.ToInt64(dr["Id"]),
+                            vd = dr["VD"].ToString(),
+                            election = dr["Election"].ToString(),
+                            day = dr["Day"].ToString(),
+                            uploadedBy = dr["UploadedBy"].ToString(),
+                            createdAt = dr["CreatedAt"].ToString(),
+                        });
+                    }
+                }
+            }
         }
-        return Directory.GetFiles(ImageFolder(), $"{SafeName(vd)}_*.jpg")
-            .Select(Path.GetFileName)
-            .OfType<string>()
-            .OrderByDescending(name => name)
-            .ToArray();
+        return Ok(all);
     }
 
     //ONE SAVED SLIP PHOTO
+    [Authorize]
     [HttpGet]
-    [Route("imagefile/{name}")]
-    public IActionResult getImageFile(string name)
+    [Route("imagefile/{id:long}")]
+    public IActionResult getImageFile(long id)
     {
-        var path = Path.Combine(ImageFolder(), Path.GetFileName(name));
-        if (!System.IO.File.Exists(path))
+        using (MySqlConnection con = new MySqlConnection(connect))
         {
-            return NotFound();
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(
+                "SELECT Image, ImageMimeType FROM ResultsSlipImages WHERE Id = @Id", con))
+            {
+                cmd.Parameters.AddWithValue("@Id", id);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    if (!dr.Read())
+                    {
+                        return NotFound();
+                    }
+                    return File((byte[])dr["Image"], dr["ImageMimeType"].ToString() ?? "image/jpeg");
+                }
+            }
         }
-        return PhysicalFile(path, "image/jpeg");
     }
 
-    private string ImageFolder() =>
-        _config?["ResultsSlipImages:Path"]
-        ?? Path.Combine(AppContext.BaseDirectory, "ResultsSlipImages");
+    private int MaxScansPerDay() =>
+        int.TryParse(_config?["ResultsSlip:MaxScansPerDay"], out var max) ? max : 20;
 
-    //keeps file names to letters, digits and dashes
-    private static string SafeName(string? value) =>
-        new string((value ?? "none").Select(c => char.IsLetterOrDigit(c) || c == '-' ? c : '-').ToArray());
+    private int CountScansToday(string cell)
+    {
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(
+                "SELECT COUNT(*) FROM ResultsSlipScans WHERE Cell = @Cell AND CreatedAt >= CURDATE()", con))
+            {
+                cmd.Parameters.AddWithValue("@Cell", cell);
+                return Convert.ToInt32(cmd.ExecuteScalar());
+            }
+        }
+    }
+
+    private void LogScan(string cell)
+    {
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(
+                "INSERT INTO ResultsSlipScans (Cell) VALUES (@Cell)", con))
+            {
+                cmd.Parameters.AddWithValue("@Cell", cell);
+                cmd.ExecuteNonQuery();
+            }
+        }
+    }
 }
 
 public class SlipImage

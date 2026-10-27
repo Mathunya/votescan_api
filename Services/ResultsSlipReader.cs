@@ -51,7 +51,7 @@ public class ResultsSlipReader
         var response = await _client.Beta.Messages.Create(new MessageCreateParams
         {
             Model = Model,
-            MaxTokens = 16000,
+            MaxTokens = 8000,
             // re-run on another model if a safety check declines the slip
             Betas = [AnthropicBeta.ServerSideFallback2026_07_01],
             Fallbacks = new Default(),
