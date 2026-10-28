@@ -297,10 +297,11 @@ public class ResultsSlipController : ControllerBase
         {
             return StatusCode(429, $"Daily limit of {MaxScansPerDay()} slip scans reached.");
         }
-        LogScan(cell);
         try
         {
             var result = await reader.ReadAsync(Convert.ToBase64String(bytes), mimeType);
+            //only a scan that worked counts towards the daily limit
+            LogScan(cell);
             return Ok(result);
         }
         catch (Exception ex)
@@ -348,12 +349,18 @@ public class ResultsSlipController : ControllerBase
         return Ok(new { id });
     }
 
-    //SLIP PHOTOS SAVED FOR A VD, newest first (details only, no image data)
+    //SLIP PHOTOS SAVED FOR A VD, newest first (details only, no image data).
+    //Only for users whose area covers the VD; uploader numbers only for admins.
     [Authorize]
     [HttpGet]
     [Route("images/{vd}")]
     public IActionResult getImages(string vd)
     {
+        if (!CanSeeVd(vd))
+        {
+            return StatusCode(403, "This VD is outside your area.");
+        }
+        var showUploader = IsAdmin();
         var all = new List<object>();
         using (MySqlConnection con = new MySqlConnection(connect))
         {
@@ -373,7 +380,7 @@ public class ResultsSlipController : ControllerBase
                             vd = dr["VD"].ToString(),
                             election = dr["Election"].ToString(),
                             day = dr["Day"].ToString(),
-                            uploadedBy = dr["UploadedBy"].ToString(),
+                            uploadedBy = showUploader ? dr["UploadedBy"].ToString() : null,
                             createdAt = dr["CreatedAt"].ToString(),
                         });
                     }
@@ -383,17 +390,20 @@ public class ResultsSlipController : ControllerBase
         return Ok(all);
     }
 
-    //ONE SAVED SLIP PHOTO
+    //ONE SAVED SLIP PHOTO, same area check as images/{vd}
     [Authorize]
     [HttpGet]
     [Route("imagefile/{id:long}")]
     public IActionResult getImageFile(long id)
     {
+        byte[] image;
+        string mimeType;
+        string vd;
         using (MySqlConnection con = new MySqlConnection(connect))
         {
             con.Open();
             using (MySqlCommand cmd = new MySqlCommand(
-                "SELECT Image, ImageMimeType FROM ResultsSlipImages WHERE Id = @Id", con))
+                "SELECT Image, ImageMimeType, VD FROM ResultsSlipImages WHERE Id = @Id", con))
             {
                 cmd.Parameters.AddWithValue("@Id", id);
                 using (MySqlDataReader dr = cmd.ExecuteReader())
@@ -402,7 +412,97 @@ public class ResultsSlipController : ControllerBase
                     {
                         return NotFound();
                     }
-                    return File((byte[])dr["Image"], dr["ImageMimeType"].ToString() ?? "image/jpeg");
+                    image = (byte[])dr["Image"];
+                    mimeType = dr["ImageMimeType"].ToString() ?? "image/jpeg";
+                    vd = dr["VD"].ToString() ?? "";
+                }
+            }
+        }
+        if (!CanSeeVd(vd))
+        {
+            return StatusCode(403, "This VD is outside your area.");
+        }
+        return File(image, mimeType);
+    }
+
+    //roles that may see every VD's slips and who uploaded them
+    private static readonly string[] AdminRoles = ["super user", "elections admin", "elections manager"];
+    //municipality codes in each Free State region
+    private static readonly Dictionary<string, string[]> RegionMunicipalities = new()
+    {
+        ["mangaung"] = ["MAN"],
+        ["xhariep"] = ["FS161", "FS162", "FS163"],
+        ["lejweleputswa"] = ["FS181", "FS182", "FS183", "FS184", "FS185"],
+        ["thabo mofutsanyana"] = ["FS191", "FS192", "FS193", "FS194", "FS195", "FS196"],
+        ["fezile dabi"] = ["FS201", "FS203", "FS204", "FS205"],
+    };
+
+    private string Claim(string name) => User.FindFirst(name)?.Value?.Trim() ?? "";
+
+    private bool IsAdmin() =>
+        AdminRoles.Contains(Claim("Role").ToLowerInvariant());
+
+    //the user's own VD, or a coordinator/manager whose ward, municipality or region
+    //holds it; provincial delegations and admins see every VD
+    private bool CanSeeVd(string vd)
+    {
+        if (string.IsNullOrEmpty(vd))
+        {
+            return false;
+        }
+        if (Claim("VD") == vd.Trim() || IsAdmin())
+        {
+            return true;
+        }
+        var delegation = Claim("Delegation").ToUpperInvariant();
+        if (delegation is "PET" or "PEC")
+        {
+            return true;
+        }
+        var role = Claim("Role").ToLowerInvariant();
+        if (!(role.Contains("coordinator") || role.Contains("manager") || role.Contains("admin")))
+        {
+            return false;
+        }
+        var (ward, municipality) = VdArea(vd);
+        if (ward != "" && Claim("Ward") == ward)
+        {
+            return true;
+        }
+        var vdMunicipality = MunicipalityCode(municipality);
+        if (delegation is "LET" or "ZET" && vdMunicipality != "" &&
+            MunicipalityCode(Claim("Municipality")) == vdMunicipality)
+        {
+            return true;
+        }
+        if (delegation is "RET" or "REC" or "RTT" && vdMunicipality != "")
+        {
+            var region = Claim("Region").ToLowerInvariant();
+            return RegionMunicipalities.Any(r => region.Contains(r.Key.Split(' ')[0]) &&
+                r.Value.Contains(vdMunicipality));
+        }
+        return false;
+    }
+
+    //"MAN - Mangaung" or "FS184 - Matjhabeng" -> MAN / FS184
+    private static string MunicipalityCode(string municipality) =>
+        municipality.Split('-')[0].Trim().ToUpperInvariant();
+
+    //ward and municipality of a VD, from the voters roll
+    private (string Ward, string Municipality) VdArea(string vd)
+    {
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(
+                "SELECT WardID, Municipality FROM AllVoters WHERE VDNumber = @VD LIMIT 1", con))
+            {
+                cmd.Parameters.AddWithValue("@VD", vd);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    return dr.Read()
+                        ? (dr["WardID"].ToString()?.Trim() ?? "", dr["Municipality"].ToString()?.Trim() ?? "")
+                        : ("", "");
                 }
             }
         }
@@ -411,15 +511,19 @@ public class ResultsSlipController : ControllerBase
     private int MaxScansPerDay() =>
         int.TryParse(_config?["ResultsSlip:MaxScansPerDay"], out var max) ? max : 20;
 
+    //scans since midnight South African time (UTC+2), whatever the DB server's timezone
     private int CountScansToday(string cell)
     {
+        var sastMidnightUtc = DateTime.UtcNow.AddHours(2).Date.AddHours(-2);
         using (MySqlConnection con = new MySqlConnection(connect))
         {
             con.Open();
-            using (MySqlCommand cmd = new MySqlCommand(
-                "SELECT COUNT(*) FROM ResultsSlipScans WHERE Cell = @Cell AND CreatedAt >= CURDATE()", con))
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SET time_zone = '+00:00';
+                SELECT COUNT(*) FROM ResultsSlipScans WHERE Cell = @Cell AND CreatedAt >= @Since", con))
             {
                 cmd.Parameters.AddWithValue("@Cell", cell);
+                cmd.Parameters.AddWithValue("@Since", sastMidnightUtc);
                 return Convert.ToInt32(cmd.ExecuteScalar());
             }
         }

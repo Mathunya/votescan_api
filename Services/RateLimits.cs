@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
 
@@ -7,20 +6,16 @@ namespace Web_Api.Services;
 // Token bucket limits, per user. Buckets live in each API node's memory, so behind
 // HAProxy a user's allowance is roughly the limit times the number of nodes, and a
 // deploy refills every bucket. Hard quotas (e.g. slip scans per day) are counted in
-// the database instead.
+// the database instead. Failed logins are limited separately by LoginThrottle.
 //
 // Policies (numbers come from the "RateLimits" config section):
 //   slipscan  - POST ResultsSlip/scan, every call is a paid Claude request
-//   login     - Login/login and getToken, keyed on the username being tried
-//   sensitive - slip photo uploads and broadcasts
+//   sensitive - slip photo uploads and broadcasts; super users are exempt
 //   general   - every other request; only logged until RateLimits:General:Enforce is true
 public static class RateLimits
 {
     public const string SlipScan = "slipscan";
-    public const string Login = "login";
     public const string Sensitive = "sensitive";
-
-    private const string LoginUserKey = "RateLimitLoginUser";
 
     //never limited: load balancer health checks, the live session hub and API docs
     private static readonly string[] ExemptPaths =
@@ -44,10 +39,12 @@ public static class RateLimits
             };
             options.AddPolicy(SlipScan, context =>
                 Bucket(PartitionKey(context), Settings(config, "SlipScan", 10, 1)));
-            options.AddPolicy(Login, context =>
-                Bucket(LoginKey(context), Settings(config, "Login", 10, 1)));
+            //super users send bulk broadcasts (e.g. 120 ward candidate cards), as with
+            //the image cap they are not limited
             options.AddPolicy(Sensitive, context =>
-                Bucket(PartitionKey(context), Settings(config, "Sensitive", 20, 1)));
+                IsSuperUser(context)
+                    ? RateLimitPartition.GetNoLimiter(PartitionKey(context))
+                    : Bucket(PartitionKey(context), Settings(config, "Sensitive", 20, 1)));
         });
         return services;
     }
@@ -62,8 +59,6 @@ public static class RateLimits
 
         app.Use(async (context, next) =>
         {
-            await RememberLoginUser(context);
-
             var path = context.Request.Path;
             if (!ExemptPaths.Any(exempt =>
                 path.StartsWithSegments(exempt, StringComparison.OrdinalIgnoreCase)))
@@ -108,6 +103,10 @@ public static class RateLimits
         AutoReplenishment = true,
     };
 
+    private static bool IsSuperUser(HttpContext context) =>
+        string.Equals(context.User.FindFirst("Role")?.Value?.Trim(), "super user",
+            StringComparison.OrdinalIgnoreCase);
+
     //the logged-in user, or the caller's address before login
     private static string PartitionKey(HttpContext context)
     {
@@ -115,53 +114,15 @@ public static class RateLimits
         return string.IsNullOrEmpty(cell) ? $"ip:{ClientIp(context)}" : $"user:{cell}";
     }
 
-    //login attempts count against the account being tried, not a bucket shared by everyone
-    private static string LoginKey(HttpContext context)
-    {
-        var username = context.Items[LoginUserKey] as string
-            ?? context.Request.RouteValues["cell"]?.ToString();
-        return string.IsNullOrEmpty(username)
-            ? $"ip:{ClientIp(context)}"
-            : $"login:{username.Trim().ToLowerInvariant()}";
-    }
-
-    //HAProxy passes the phone's address in X-Forwarded-For
-    private static string ClientIp(HttpContext context)
+    // HAProxy appends the address it saw to X-Forwarded-For, so the last entry is the
+    // one it vouches for; earlier entries can be set by the client.
+    public static string ClientIp(HttpContext context)
     {
         var forwarded = context.Request.Headers["X-Forwarded-For"].ToString();
         if (!string.IsNullOrEmpty(forwarded))
         {
-            return forwarded.Split(',')[0].Trim();
+            return forwarded.Split(',')[^1].Trim();
         }
         return context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-    }
-
-    //reads the username from the login body so the login policy can key on it
-    private static async Task RememberLoginUser(HttpContext context)
-    {
-        if (!HttpMethods.IsPost(context.Request.Method) ||
-            !context.Request.Path.Equals("/Login/login", StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-        context.Request.EnableBuffering();
-        try
-        {
-            using var body = await JsonDocument.ParseAsync(context.Request.Body);
-            if (body.RootElement.ValueKind == JsonValueKind.Object &&
-                body.RootElement.TryGetProperty("username", out var username) &&
-                username.ValueKind == JsonValueKind.String)
-            {
-                context.Items[LoginUserKey] = username.GetString();
-            }
-        }
-        catch (JsonException)
-        {
-            //the login action reports a bad body itself
-        }
-        finally
-        {
-            context.Request.Body.Position = 0;
-        }
     }
 }

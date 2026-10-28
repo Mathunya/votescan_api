@@ -74,6 +74,8 @@ builder.Services.AddScoped<WelcomeService>();
 // reads photographed results slips with Claude vision
 builder.Services.AddSingleton<ResultsSlipReader>();
 builder.Services.AddVoteScanRateLimits(builder.Configuration);
+// counts failed logins per username and caller, kept in memory on each node
+builder.Services.AddSingleton<LoginThrottle>();
 
 var app = builder.Build();
 app.UseCors("corspolicy");

@@ -8,7 +8,6 @@ using System.Text;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using Microsoft.AspNetCore.SignalR;
-using Microsoft.AspNetCore.RateLimiting;
 
 namespace Web_Api.Controllers;
 
@@ -22,10 +21,12 @@ public class LoginController : ControllerBase{
     private User user;
     private readonly IHubContext<SessionHub>? _hubContext;
     private readonly WelcomeService _welcome;
+    private readonly LoginThrottle _loginThrottle;
 
-    public LoginController(IConfiguration configuration,IHubContext<SessionHub> hubContext, ILogger<LoginController> logger, WelcomeService welcome)
+    public LoginController(IConfiguration configuration,IHubContext<SessionHub> hubContext, ILogger<LoginController> logger, WelcomeService welcome, LoginThrottle loginThrottle)
     {
         _config = configuration;
+        _loginThrottle = loginThrottle;
         _logger = logger;
         _welcome = welcome;
         _connect = _config.GetConnectionString("ConsString");
@@ -37,7 +38,6 @@ public class LoginController : ControllerBase{
    
     // ✅ POST (secure)
     [HttpPost("login")]
-    [EnableRateLimiting(RateLimits.Login)]
     public async Task<IActionResult> Login([FromBody] Credentials request)
     {
         if (request == null)
@@ -47,6 +47,11 @@ public class LoginController : ControllerBase{
             string.IsNullOrWhiteSpace(request.password)){
             return BadRequest("Username or password missing");
         }
+        //only failed attempts from this caller count, so others cannot lock the user out
+        var throttleKey = LoginThrottle.Key(request.username, HttpContext);
+        if (_loginThrottle.IsBlocked(throttleKey))
+            return StatusCode(StatusCodes.Status429TooManyRequests,
+                "Too many failed attempts. Please wait a minute and try again.");
         User? user;
         try
         {
@@ -59,7 +64,11 @@ public class LoginController : ControllerBase{
         }
 
         if (user == null || string.IsNullOrEmpty(user.Cell))
+        {
+            _loginThrottle.RecordFailure(throttleKey);
             return Unauthorized("Invalid credentials");
+        }
+        _loginThrottle.Reset(throttleKey);
 
         // 🔑 create sessionId (important for SignalR control)
         var sessionId = Guid.NewGuid().ToString();
@@ -98,11 +107,17 @@ public class LoginController : ControllerBase{
     }
     [HttpGet]
     [Route("getToken/{cell}/{password}")]
-    [EnableRateLimiting(RateLimits.Login)]
     public  async Task<Token> getToken(string cell,string password)
     {
         Token token=new Token();
          var sessionId = Guid.NewGuid().ToString();
+        var throttleKey = LoginThrottle.Key(cell, HttpContext);
+        if (_loginThrottle.IsBlocked(throttleKey))
+        {
+            Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            token.token = "Too many failed attempts. Please wait a minute and try again.";
+            return token;
+        }
 
         User? user;
         try
@@ -117,9 +132,11 @@ public class LoginController : ControllerBase{
         }
         if (user==null)
         {
+            _loginThrottle.RecordFailure(throttleKey);
             token.token= "No user found";
             return token;
         }
+        _loginThrottle.Reset(throttleKey);
         token.token=GenerateJwtToken(user,sessionId);
         return token;
     }
