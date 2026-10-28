@@ -410,9 +410,15 @@ public class ResultsSlipController : ControllerBase
         }
         var saved = SaveResults(election, vd, ballot, parties, "confirmed", cell, confirm.SlipId,
             confirm.PartyAgent);
+        //every page of the slip is marked saved
+        var slipIds = (confirm.SlipIds ?? []).ToList();
         if (confirm.SlipId.HasValue)
         {
-            MarkUpload(confirm.SlipId.Value, "saved", vd, ballot, null);
+            slipIds.Add(confirm.SlipId.Value);
+        }
+        foreach (var id in slipIds.Distinct())
+        {
+            MarkUpload(id, "saved", vd, ballot, null);
         }
         return Ok(new { saved, vd, ballot, election });
     }
@@ -1036,7 +1042,7 @@ public class ResultsSlipController : ControllerBase
     }
 
     private int MaxScansPerDay() =>
-        int.TryParse(_config?["ResultsSlip:MaxScansPerDay"], out var max) ? max : 20;
+        int.TryParse(_config?["ResultsSlip:MaxScansPerDay"], out var max) ? max : 60;
 
     //scans since midnight South African time (UTC+2); the DB runs on UTC, so CreatedAt
     //compares directly with the UTC instant of SAST midnight
@@ -1081,6 +1087,8 @@ public class SlipParty
 public class SlipConfirm
 {
     public long? SlipId { get; set; }
+    //all pages of a multi-page slip
+    public List<long>? SlipIds { get; set; }
     public string? VD { get; set; }
     public string? Ballot { get; set; }
     public string? Election { get; set; }
