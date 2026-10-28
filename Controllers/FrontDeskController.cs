@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using MySql.Data.MySqlClient;
 using System.Data;
+using System.Globalization;
 using Web_Api.Models;
 
 namespace Web_Api.Controllers;
@@ -424,14 +425,106 @@ public class FrontDeskController : ControllerBase
                 AddMissingGetFrontDeskRecordedParameters(cmd);
                 con.Open();
                 cmd.AddMissingStoredProcedureParameters();
-                var ret = cmd.ExecuteNonQuery();
-                retCode = Convert.ToInt32(ret);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    //the procedure selects Result: 1 = captured now, 2 = already captured
+                    if (dr.Read() && !dr.IsDBNull(0))
+                    {
+                        retCode = Convert.ToInt32(dr.GetValue(0));
+                    }
+                    else
+                    {
+                        //older procedure without Result: rows changed means captured
+                        dr.Close();
+                        retCode = dr.RecordsAffected > 0 ? 1 : 0;
+                    }
+                }
                 con.Close();
             }
         }
-        //  -1 =failue
-        //   1 = account saved successfully
+        //  <=0 = failure
+        //    1 = captured now
+        //    2 = already captured (by anyone)
         return retCode;
+    }
+
+    //WHAT CHANGED IN A WARD SINCE THE PHONE LAST ASKED
+    //captured: AllVoters row IDs captured at front desk in this ward (and election) since
+    //`since` minus 5 minutes (covers clock differences between Galera nodes; the phone
+    //ignores IDs it already has). Paged by the server-stamped Date, never by Id, because
+    //Galera hands out Ids in steps per node. No names or ID numbers are returned.
+    //serverTime: the database's UTC time, which the phone sends back as `since`.
+    //rollVersion: bumped per ward only when its IEC roll changes; phones re-download then.
+    [HttpGet]
+    [Route("wardchanges/{ward}")]
+    public IActionResult wardchanges(string ward, [FromQuery] string? since, [FromQuery] string? election)
+    {
+        DateTime serverTime;
+        int rollVersion = 1;
+        var captured = new List<int>();
+        DateTime? sinceUtc = null;
+        if (!string.IsNullOrWhiteSpace(since) &&
+            DateTime.TryParse(since, CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed))
+        {
+            sinceUtc = parsed.AddMinutes(-5);
+        }
+
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand("SELECT UTC_TIMESTAMP()", con))
+            {
+                serverTime = DateTime.SpecifyKind(Convert.ToDateTime(cmd.ExecuteScalar()), DateTimeKind.Utc);
+            }
+            try
+            {
+                using (MySqlCommand cmd = new MySqlCommand(
+                    "SELECT Version FROM WardRollVersion WHERE WardID = @Ward", con))
+                {
+                    cmd.Parameters.AddWithValue("@Ward", ward);
+                    var version = cmd.ExecuteScalar();
+                    if (version != null && version != DBNull.Value)
+                    {
+                        rollVersion = Convert.ToInt32(version);
+                    }
+                }
+            }
+            catch (MySqlException ex) when (ex.Number == 1146)
+            {
+                //WardRollVersion not created yet: every ward is version 1
+            }
+            try
+            {
+                var sql = "SELECT VoterRowID FROM FrontDeskRecorded " +
+                    "WHERE WardID = @Ward AND VoterRowID IS NOT NULL";
+                if (!string.IsNullOrWhiteSpace(election)) sql += " AND Election = @Election";
+                if (sinceUtc.HasValue) sql += " AND `Date` >= @Since";
+                using (MySqlCommand cmd = new MySqlCommand(sql, con))
+                {
+                    cmd.Parameters.AddWithValue("@Ward", ward);
+                    if (!string.IsNullOrWhiteSpace(election)) cmd.Parameters.AddWithValue("@Election", election);
+                    if (sinceUtc.HasValue) cmd.Parameters.AddWithValue("@Since", sinceUtc.Value);
+                    using (MySqlDataReader dr = cmd.ExecuteReader())
+                    {
+                        while (dr.Read())
+                        {
+                            captured.Add(Convert.ToInt32(dr["VoterRowID"]));
+                        }
+                    }
+                }
+            }
+            catch (MySqlException ex) when (ex.Number == 1054)
+            {
+                //VoterRowID column not added yet: nothing to report
+            }
+        }
+        return Ok(new
+        {
+            serverTime = serverTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
+            rollVersion,
+            captured = captured.Distinct(),
+        });
     }
     //FOR NATIONAL AND PROVINCIAL ELECTIONS
     [HttpGet]
