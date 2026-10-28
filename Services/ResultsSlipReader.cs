@@ -22,6 +22,10 @@ public class ResultsSlipReader
         Transcribe:
         - vd_number: the 8 digit number printed after "VD". vd_name: the voting station name below it.
         - province, municipality, registered_voters and the ballot/election title as printed.
+        - ballot_type: which ballot the slip is for, from its heading: "ward" for the ward
+          councillor ballot, "pr" for the proportional representation (party list) ballot of
+          the local or metro council, "district" for the district council ballot, or
+          "unknown" when the heading does not say.
         - page: the "Page x of y" text if present.
         - parties: one entry per table row, top to bottom in the printed order. Copy the printed
           name and abbreviation exactly. votes is the handwritten Result for that row as a whole
@@ -109,7 +113,7 @@ public class ResultsSlipReader
         ["required"] = JsonSerializer.SerializeToElement(new[]
         {
             "vd_number", "vd_name", "province", "municipality", "registered_voters",
-            "election_title", "page", "parties", "notes",
+            "election_title", "ballot_type", "page", "parties", "notes",
         }),
         ["properties"] = JsonSerializer.SerializeToElement(new Dictionary<string, object>
         {
@@ -119,6 +123,7 @@ public class ResultsSlipReader
             ["municipality"] = new { type = "string" },
             ["registered_voters"] = new { type = "string" },
             ["election_title"] = new { type = "string" },
+            ["ballot_type"] = new { type = "string", @enum = new[] { "ward", "pr", "district", "unknown" } },
             ["page"] = new { type = "string" },
             ["notes"] = new { type = "string" },
             ["parties"] = new
