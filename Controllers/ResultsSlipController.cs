@@ -450,8 +450,35 @@ public class ResultsSlipController : ControllerBase
     private bool IsAdmin() =>
         AdminRoles.Contains(Claim("Role").ToLowerInvariant());
 
-    //the user's own VD, or a coordinator/manager whose ward, municipality or region
-    //holds it; provincial delegations and admins see every VD
+    //election structures whose leaders may see slips across their area
+    private static readonly string[] StructurePrefixes =
+        ["vd ", "bet ", "ward ", "let ", "zet ", "ret ", "rec ", "rtt ", "pet ", "pec "];
+    private static readonly string[] LeaderWords =
+        ["coordinator", "manager", "admin", "mec", "convenor"];
+
+    //e.g. VD Coordinator, Deputy BET Coordinator, LET Admin, RET Managers, PEC MEC,
+    //elections coordinator; not Food/Transport/Youth League coordinators, Candidates,
+    //Troubleshooters or Members
+    private static bool IsStructureLeader(string role)
+    {
+        var r = role.Trim().ToLowerInvariant();
+        if (r == "elections coordinator")
+        {
+            return true;
+        }
+        foreach (var deputy in new[] { "deputy ", "dpt " })
+        {
+            if (r.StartsWith(deputy))
+            {
+                r = r[deputy.Length..];
+            }
+        }
+        return StructurePrefixes.Any(prefix => r.StartsWith(prefix)) &&
+            LeaderWords.Any(word => r.Contains(word));
+    }
+
+    //the user's own VD; structure leaders also see their ward, LET/ZET municipality
+    //or RET region (PET/PEC leaders and admins see every VD)
     private bool CanSeeVd(string vd)
     {
         if (string.IsNullOrEmpty(vd))
@@ -462,15 +489,14 @@ public class ResultsSlipController : ControllerBase
         {
             return true;
         }
+        if (!IsStructureLeader(Claim("Role")))
+        {
+            return false;
+        }
         var delegation = Claim("Delegation").ToUpperInvariant();
         if (delegation is "PET" or "PEC")
         {
             return true;
-        }
-        var role = Claim("Role").ToLowerInvariant();
-        if (!(role.Contains("coordinator") || role.Contains("manager") || role.Contains("admin")))
-        {
-            return false;
         }
         var (ward, municipality) = VdArea(vd);
         if (ward != "" && Claim("Ward") == ward)
