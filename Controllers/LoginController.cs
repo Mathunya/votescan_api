@@ -49,7 +49,7 @@ public class LoginController : ControllerBase{
         }
         //only failed attempts from this caller count, so others cannot lock the user out
         var throttleKey = LoginThrottle.Key(request.username, HttpContext);
-        if (_loginThrottle.IsBlocked(throttleKey))
+        if (_loginThrottle.ShouldBlock(throttleKey, request.username))
             return StatusCode(StatusCodes.Status429TooManyRequests,
                 "Too many failed attempts. Please wait a minute and try again.");
         User? user;
@@ -112,7 +112,7 @@ public class LoginController : ControllerBase{
         Token token=new Token();
          var sessionId = Guid.NewGuid().ToString();
         var throttleKey = LoginThrottle.Key(cell, HttpContext);
-        if (_loginThrottle.IsBlocked(throttleKey))
+        if (_loginThrottle.ShouldBlock(throttleKey, cell))
         {
             Response.StatusCode = StatusCodes.Status429TooManyRequests;
             token.token = "Too many failed attempts. Please wait a minute and try again.";

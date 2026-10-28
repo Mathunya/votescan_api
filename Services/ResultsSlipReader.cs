@@ -81,15 +81,25 @@ public class ResultsSlipReader
             ],
         });
 
+        // From here Anthropic has answered, so the call is billed even if the answer is
+        // unusable; SlipNotReadException tells the caller to count it.
         if (response.StopReason == "refusal")
         {
-            throw new InvalidOperationException("The slip could not be read. Please retake the photo.");
+            throw new SlipNotReadException("Claude declined to read the slip.");
         }
         var text = string.Concat(response.Content
             .Select(block => block.Value)
             .OfType<BetaTextBlock>()
             .Select(block => block.Text));
-        return JsonDocument.Parse(text).RootElement.Clone();
+        try
+        {
+            return JsonDocument.Parse(text).RootElement.Clone();
+        }
+        catch (JsonException ex)
+        {
+            throw new SlipNotReadException(
+                $"Claude's answer was not valid JSON (stop reason {response.StopReason}): {ex.Message}");
+        }
     }
 
     private static readonly Dictionary<string, JsonElement> SlipSchema = new()
@@ -130,4 +140,13 @@ public class ResultsSlipReader
             },
         }),
     };
+}
+
+
+// Anthropic returned a response (a paid call) but it could not be used as a slip reading.
+public class SlipNotReadException : Exception
+{
+    public SlipNotReadException(string message) : base(message)
+    {
+    }
 }

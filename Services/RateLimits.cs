@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
 
@@ -50,12 +51,19 @@ public static class RateLimits
     }
 
     // Runs after authentication so the user is known, before UseRateLimiter.
+    //
+    // RateLimits:General:Enforce MUST stay false until the app (and dashboard) send the
+    // login token on every call. Most app calls are anonymous today, and the DC2 router
+    // rewrites every source address to 192.168.0.1, so all anonymous traffic shares one
+    // bucket (ip:192.168.0.1); enforcing it would block most of the app at once.
     public static IApplicationBuilder UseVoteScanRateLimits(
         this IApplicationBuilder app, IConfiguration config)
     {
         var general = PartitionedRateLimiter.Create<HttpContext, string>(context =>
             Bucket(PartitionKey(context), Settings(config, "General", 300, 60)));
         var enforce = config.GetValue<bool>("RateLimits:General:Enforce");
+        //one warning per key per minute, so a shared bucket cannot flood the logs
+        var lastWarned = new ConcurrentDictionary<string, DateTime>();
 
         app.Use(async (context, next) =>
         {
@@ -66,13 +74,19 @@ public static class RateLimits
                 using var lease = general.AttemptAcquire(context);
                 if (!lease.IsAcquired)
                 {
-                    var logger = context.RequestServices
-                        .GetRequiredService<ILoggerFactory>()
-                        .CreateLogger("RateLimits");
-                    logger.LogWarning(
-                        "General rate limit {Action} for {Key} on {Method} {Path}",
-                        enforce ? "blocked" : "would block",
-                        PartitionKey(context), context.Request.Method, path);
+                    var key = PartitionKey(context);
+                    var now = DateTime.UtcNow;
+                    if (now - lastWarned.GetValueOrDefault(key) >= TimeSpan.FromMinutes(1))
+                    {
+                        lastWarned[key] = now;
+                        var logger = context.RequestServices
+                            .GetRequiredService<ILoggerFactory>()
+                            .CreateLogger("RateLimits");
+                        logger.LogWarning(
+                            "General rate limit {Action} for {Key} on {Method} {Path} (further hits this minute not logged)",
+                            enforce ? "blocked" : "would block",
+                            key, context.Request.Method, path);
+                    }
                     if (enforce)
                     {
                         context.Response.StatusCode = StatusCodes.Status429TooManyRequests;

@@ -297,12 +297,20 @@ public class ResultsSlipController : ControllerBase
         {
             return StatusCode(429, $"Daily limit of {MaxScansPerDay()} slip scans reached.");
         }
+        //every scan Anthropic answered counts towards the daily limit, including refusals
+        //and unreadable answers, since those calls are still paid for; failures where
+        //nothing came back (network, timeouts, Anthropic errors) do not count
         try
         {
             var result = await reader.ReadAsync(Convert.ToBase64String(bytes), mimeType);
-            //only a scan that worked counts towards the daily limit
             LogScan(cell);
             return Ok(result);
+        }
+        catch (SlipNotReadException ex)
+        {
+            LogScan(cell);
+            Console.WriteLine("results slip scan unusable => " + ex.Message);
+            return StatusCode(502, "Could not read the slip. Please retake the photo.");
         }
         catch (Exception ex)
         {
@@ -511,16 +519,16 @@ public class ResultsSlipController : ControllerBase
     private int MaxScansPerDay() =>
         int.TryParse(_config?["ResultsSlip:MaxScansPerDay"], out var max) ? max : 20;
 
-    //scans since midnight South African time (UTC+2), whatever the DB server's timezone
+    //scans since midnight South African time (UTC+2); the DB runs on UTC, so CreatedAt
+    //compares directly with the UTC instant of SAST midnight
     private int CountScansToday(string cell)
     {
         var sastMidnightUtc = DateTime.UtcNow.AddHours(2).Date.AddHours(-2);
         using (MySqlConnection con = new MySqlConnection(connect))
         {
             con.Open();
-            using (MySqlCommand cmd = new MySqlCommand(@"
-                SET time_zone = '+00:00';
-                SELECT COUNT(*) FROM ResultsSlipScans WHERE Cell = @Cell AND CreatedAt >= @Since", con))
+            using (MySqlCommand cmd = new MySqlCommand(
+                "SELECT COUNT(*) FROM ResultsSlipScans WHERE Cell = @Cell AND CreatedAt >= @Since", con))
             {
                 cmd.Parameters.AddWithValue("@Cell", cell);
                 cmd.Parameters.AddWithValue("@Since", sastMidnightUtc);
