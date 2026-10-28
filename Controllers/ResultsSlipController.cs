@@ -331,7 +331,25 @@ public class ResultsSlipController : ControllerBase
         var vd = DigitsOnly(reading["vd_number"]?.GetValue<string>());
         var ballot = NormaliseBallot(reading["ballot_type"]?.GetValue<string>());
         var info = VdInfo(vd);
-        MarkUpload(slipId, "read", info.Known ? vd : "", ballot, reading.ToJsonString());
+        //the next page of a slip: later pages may not repeat the heading, so the VD and
+        //ballot of the page before are used when this page does not show them
+        var previousVd = DigitsOnly(slip.PageOfVD);
+        if (!info.Known && previousVd.Length > 0)
+        {
+            var previous = VdInfo(previousVd);
+            if (previous.Known)
+            {
+                vd = previousVd;
+                info = previous;
+                reading["vd_from_previous_page"] = true;
+            }
+        }
+        if (ballot == "unknown" && !string.IsNullOrWhiteSpace(slip.PageOfBallot))
+        {
+            ballot = NormaliseBallot(slip.PageOfBallot);
+        }
+        var (pageNo, pageCount) = ParsePage(reading["page"]?.GetValue<string>());
+        MarkUpload(slipId, "read", info.Known ? vd : "", ballot, reading.ToJsonString(), pageNo, pageCount);
 
         //saved straight away as unconfirmed; Save on the phone confirms it later
         var autoSaved = 0;
@@ -350,6 +368,8 @@ public class ResultsSlipController : ControllerBase
 
         reading["slip_id"] = slipId;
         reading["ballot"] = ballot;
+        reading["page_no"] = pageNo;
+        reading["page_count"] = pageCount;
         reading["election"] = election;
         reading["vd_info"] = info.ToJson(vd);
         reading["auto_saved"] = autoSaved;
@@ -437,7 +457,38 @@ public class ResultsSlipController : ControllerBase
                 }
             }
         }
-        return Ok(all);
+        //pages captured per ballot, so a missing page of a multi-page slip shows up
+        var pages = new JsonObject();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT Ballot, GROUP_CONCAT(DISTINCT PageNo ORDER BY PageNo) AS Seen, MAX(PageCount) AS PageCount
+                FROM ResultsSlipImages
+                WHERE VD = @VD AND Election = @Election AND Status IN ('read', 'saved') AND PageNo > 0
+                GROUP BY Ballot", con))
+            {
+                cmd.Parameters.AddWithValue("@VD", DigitsOnly(vd));
+                cmd.Parameters.AddWithValue("@Election", ElectionName(election));
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var seen = new JsonArray();
+                        foreach (var page in (dr["Seen"].ToString() ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+                        {
+                            seen.Add(int.Parse(page));
+                        }
+                        pages[dr["Ballot"].ToString() ?? ""] = new JsonObject
+                        {
+                            ["seen"] = seen,
+                            ["of"] = Convert.ToInt32(dr["PageCount"]),
+                        };
+                    }
+                }
+            }
+        }
+        return Ok(new { results = all, pages });
     }
 
     //NAME, WARD AND MUNICIPALITY OF A VD, to check a VD number read off (or typed from) a slip
@@ -774,8 +825,23 @@ public class ResultsSlipController : ControllerBase
         }
     }
 
-    //record what happened to an upload; VD/ballot/reading only change when given
-    private void MarkUpload(long id, string status, string? vd = null, string? ballot = null, string? reading = null)
+    //"Page 1 of 2" -> (1, 2); (0, 0) when the slip shows no page number
+    private static (int PageNo, int PageCount) ParsePage(string? page)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(page ?? "", @"(\d+)\s*(?:of|/)\s*(\d+)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!match.Success)
+        {
+            return (0, 0);
+        }
+        var no = int.Parse(match.Groups[1].Value);
+        var count = int.Parse(match.Groups[2].Value);
+        return no >= 1 && count >= no && count <= 20 ? (no, count) : (0, 0);
+    }
+
+    //record what happened to an upload; VD/ballot/reading/page only change when given
+    private void MarkUpload(long id, string status, string? vd = null, string? ballot = null, string? reading = null,
+        int? pageNo = null, int? pageCount = null)
     {
         try
         {
@@ -788,13 +854,17 @@ public class ResultsSlipController : ControllerBase
                         VD = COALESCE(@VD, VD),
                         Ballot = COALESCE(@Ballot, Ballot),
                         Reading = COALESCE(@Reading, Reading),
-                        ReadAt = IF(@Reading IS NULL, ReadAt, UTC_TIMESTAMP())
+                        ReadAt = IF(@Reading IS NULL, ReadAt, UTC_TIMESTAMP()),
+                        PageNo = COALESCE(@PageNo, PageNo),
+                        PageCount = COALESCE(@PageCount, PageCount)
                     WHERE Id = @Id", con))
                 {
                     cmd.Parameters.AddWithValue("@Status", status);
                     cmd.Parameters.AddWithValue("@VD", (object?)vd ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@Ballot", (object?)ballot ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@Reading", (object?)reading ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@PageNo", (object?)pageNo ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@PageCount", (object?)pageCount ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@Id", id);
                     cmd.ExecuteNonQuery();
                 }
@@ -1027,4 +1097,7 @@ public class SlipImage
     public string? VD { get; set; }
     public string? Election { get; set; }
     public string? Day { get; set; }
+    //set when this photo is the next page of a slip: that slip's VD and ballot
+    public string? PageOfVD { get; set; }
+    public string? PageOfBallot { get; set; }
 }

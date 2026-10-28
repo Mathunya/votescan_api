@@ -12,6 +12,9 @@ ALTER TABLE ResultsSlipImages
     ADD COLUMN UserVD VARCHAR(20) NOT NULL DEFAULT '' AFTER UploadedBy,
     -- Claude's full reading, kept for audit
     ADD COLUMN Reading MEDIUMTEXT NULL,
+    -- multi-page slips: "Page 1 of 2" as read from the slip (0 when not printed)
+    ADD COLUMN PageNo INT NOT NULL DEFAULT 0,
+    ADD COLUMN PageCount INT NOT NULL DEFAULT 0,
     ADD COLUMN ReadAt TIMESTAMP NULL DEFAULT NULL,
     ADD KEY idx_status (Status),
     ADD KEY idx_uploadedby (UploadedBy);
