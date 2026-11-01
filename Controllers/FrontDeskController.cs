@@ -61,7 +61,7 @@ public class FrontDeskController : ControllerBase
                     v.VoterID = dr["VoterID"].ToString();
                     v.Election=dr["Election"].ToString();
                     v.ScanVD=dr["ScanVD"].ToString();
-                    v.Date= dr["Date"].ToString();
+                    v.Date= SouthAfricanTime(dr["Date"]);
                     all.Add(v);
                 }
                 //close connections
@@ -112,7 +112,7 @@ public class FrontDeskController : ControllerBase
                     v.ResPostalCode = dr["ResPostalCode"].ToString();
                     v.VoterID = dr["VoterID"].ToString();
                     v.Election=dr["Election"].ToString();
-                    v.Date= dr["Date"].ToString();
+                    v.Date= SouthAfricanTime(dr["Date"]);
                     all.Add(v);
                 }
                 //close connections
@@ -163,7 +163,7 @@ public class FrontDeskController : ControllerBase
                     v.ResPostalCode = dr["ResPostalCode"].ToString();
                     v.VoterID = dr["VoterID"].ToString();
                     v.Election=dr["Election"].ToString();
-                    v.Date= dr["Date"].ToString();
+                    v.Date= SouthAfricanTime(dr["Date"]);
                     all.Add(v);
                 }
                 //close connections
@@ -214,7 +214,7 @@ public class FrontDeskController : ControllerBase
                     v.ResPostalCode = dr["ResPostalCode"].ToString();
                     v.VoterID = dr["VoterID"].ToString();
                     v.Election=dr["Election"].ToString();
-                    v.Date= dr["Date"].ToString();
+                    v.Date= SouthAfricanTime(dr["Date"]);
                     all.Add(v);
                 }
                 //close connections
@@ -790,6 +790,12 @@ public class FrontDeskController : ControllerBase
             }
         }
         return all.ToArray();
+    }
+
+    //FrontDeskRecorded.Date is the database's UTC time; people read South African time
+    private static string SouthAfricanTime(object date)
+    {
+        return date is DateTime utc ? utc.AddHours(2).ToString() : date.ToString();
     }
 
     private static void AddMissingGetFrontDeskRecordedParameters(MySqlCommand cmd)
