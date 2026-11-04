@@ -511,26 +511,35 @@ public class ResultsSlipController : ControllerBase
     [Authorize]
     [HttpGet]
     [Route("summary/{municipality}")]
-    public IActionResult summary(string municipality, [FromQuery] string? mode, [FromServices] IMemoryCache cache)
+    public async Task<IActionResult> summary(string municipality, [FromQuery] string? mode, [FromServices] IMemoryCache cache)
     {
         var all = mode == "all";
         var election = ElectionName(null);
+        return Ok(await GetOrBuildSummaryAsync(election, municipality, all, cache));
+    }
+
+    //one cache-miss computation per (election, municipality, mode) at a time, awaited
+    //rather than blocking a thread-pool thread, shared by summary() and
+    //summaryByRegion() so a region request warming several cold municipalities at once
+    //still only runs each municipality's four queries once.
+    private async Task<JsonObject> GetOrBuildSummaryAsync(string election, string municipality, bool all, IMemoryCache cache)
+    {
         var key = $"slip-summary|{election}|{municipality}|{(all ? "all" : "confirmed")}";
         if (cache.TryGetValue(key, out JsonObject? hit))
         {
-            return Ok(hit);
+            return hit!;
         }
         var gate = SummaryGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
-        gate.Wait();
+        await gate.WaitAsync();
         try
         {
             if (cache.TryGetValue(key, out hit))
             {
-                return Ok(hit);
+                return hit!;
             }
-            var result = BuildSummary(election, municipality, all);
+            var result = BuildSummary(election, municipality, all, cache);
             cache.Set(key, result, TimeSpan.FromSeconds(60));
-            return Ok(result);
+            return result;
         }
         finally
         {
@@ -540,12 +549,13 @@ public class ResultsSlipController : ControllerBase
 
     //SAME TOTALS ADDED ACROSS A REGION'S MUNICIPALITIES. Seats are not re-estimated here
     //(the council size is per municipality, so "seats for a region" has no meaning) -
-    //only coverage and party votes are summed. Each municipality's own summary is cached
-    //as usual, so this piggybacks on whichever of them are already warm.
+    //only coverage and party votes are summed. Each municipality's own summary goes
+    //through the same cache/gate as summary(), so this piggybacks on whichever of them
+    //are already warm instead of racing them to recompute a cold one.
     [Authorize]
     [HttpGet]
     [Route("summary/region/{region}")]
-    public IActionResult summaryByRegion(string region, [FromQuery] string? mode, [FromServices] IMemoryCache cache)
+    public async Task<IActionResult> summaryByRegion(string region, [FromQuery] string? mode, [FromServices] IMemoryCache cache)
     {
         var all = mode == "all";
         var election = ElectionName(null);
@@ -559,13 +569,8 @@ public class ResultsSlipController : ControllerBase
         var parties = new Dictionary<string, (string Name, long WardVotes, long PrVotes)>();
         foreach (var municipality in municipalities)
         {
-            var key = $"slip-summary|{election}|{municipality}|{(all ? "all" : "confirmed")}";
-            if (!cache.TryGetValue(key, out JsonObject? muni))
-            {
-                muni = BuildSummary(election, municipality, all);
-                cache.Set(key, muni, TimeSpan.FromSeconds(60));
-            }
-            var c = muni!["coverage"]!.AsObject();
+            var muni = await GetOrBuildSummaryAsync(election, municipality, all, cache);
+            var c = muni["coverage"]!.AsObject();
             vds += c["vds"]!.GetValue<int>();
             vdsWard += c["vdsWard"]!.GetValue<int>();
             vdsPr += c["vdsPr"]!.GetValue<int>();
@@ -619,7 +624,7 @@ public class ResultsSlipController : ControllerBase
     [Authorize]
     [HttpGet]
     [Route("coverage/{municipality}")]
-    public IActionResult coverage(string municipality, [FromServices] IMemoryCache cache)
+    public async Task<IActionResult> coverage(string municipality, [FromServices] IMemoryCache cache)
     {
         var election = ElectionName(null);
         var key = $"slip-coverage|{election}|{municipality}";
@@ -628,14 +633,14 @@ public class ResultsSlipController : ControllerBase
             return Ok(hit);
         }
         var gate = SummaryGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
-        gate.Wait();
+        await gate.WaitAsync();
         try
         {
             if (cache.TryGetValue(key, out hit))
             {
                 return Ok(hit);
             }
-            var result = BuildCoverage(election, municipality);
+            var result = BuildCoverage(election, municipality, cache);
             cache.Set(key, result, TimeSpan.FromSeconds(60));
             return Ok(result);
         }
@@ -1251,14 +1256,19 @@ public class ResultsSlipController : ControllerBase
         }
     }
 
-    //everything GET /ResultsSlip/summary/{municipality} returns: coverage, party votes,
-    //ward leaders, flags and (when CouncilSeats has a row for this municipality) the PR
-    //seat estimate. Runs the four queries from the plan's section 5 plus the VD roster;
-    //only called on a cache miss.
-    private JsonObject BuildSummary(string election, string municipality, bool all)
+    //every VD in a municipality, its ward, and how many registered voters it has.
+    //Changes about once a day (voters roll updates), not every 60s like results do, so
+    //it's cached separately and for far longer - re-running this GROUP BY over AllVoters
+    //on every summary/coverage cache refresh was real, measured load on election night
+    //(2,000 req/min, 47% peak CPU) for data that is essentially static in that window.
+    private Dictionary<string, (string Ward, long Registered)> GetVdRoster(string municipality, IMemoryCache cache)
     {
-        //1 - every VD in the municipality and how many registered voters it has
-        var registeredByVd = new Dictionary<string, (string Ward, long Registered)>();
+        var key = $"vd-roster|{municipality}";
+        if (cache.TryGetValue(key, out Dictionary<string, (string Ward, long Registered)>? hit))
+        {
+            return hit!;
+        }
+        var roster = new Dictionary<string, (string Ward, long Registered)>();
         using (MySqlConnection con = new MySqlConnection(connect))
         {
             con.Open();
@@ -1272,12 +1282,24 @@ public class ResultsSlipController : ControllerBase
                 {
                     while (dr.Read())
                     {
-                        registeredByVd[dr["VDNumber"].ToString() ?? ""] =
+                        roster[dr["VDNumber"].ToString() ?? ""] =
                             (dr["WardID"].ToString() ?? "", Convert.ToInt64(dr["Registered"]));
                     }
                 }
             }
         }
+        cache.Set(key, roster, TimeSpan.FromHours(24));
+        return roster;
+    }
+
+    //everything GET /ResultsSlip/summary/{municipality} returns: coverage, party votes,
+    //ward leaders, flags and (when CouncilSeats has a row for this municipality) the PR
+    //seat estimate. Runs the four queries from the plan's section 5 plus the VD roster;
+    //only called on a cache miss.
+    private JsonObject BuildSummary(string election, string municipality, bool all, IMemoryCache cache)
+    {
+        //1 - every VD in the municipality and how many registered voters it has
+        var registeredByVd = GetVdRoster(municipality, cache);
 
         //2 - which VDs have a confirmed/unconfirmed ward and PR slip live right now
         var statusByVdBallot = new Dictionary<(string Vd, string Ballot), (bool Confirmed, bool Unconfirmed)>();
@@ -1510,7 +1532,8 @@ public class ResultsSlipController : ControllerBase
         if (councilSeats != null)
         {
             var inputs = partyTotals.Select(kv => new SeatEstimator.PartyInput(
-                kv.Key, (int)(kv.Value.WardVotes + kv.Value.PrVotes), wardsWonByParty.GetValueOrDefault(kv.Key)));
+                kv.Key, (int)(kv.Value.WardVotes + kv.Value.PrVotes), (int)kv.Value.PrVotes,
+                wardsWonByParty.GetValueOrDefault(kv.Key)));
             var estimate = SeatEstimator.Estimate_(councilSeats.Value.Seats, councilSeats.Value.IndependentWards, inputs);
             seats = new JsonObject
             {
@@ -1559,25 +1582,9 @@ public class ResultsSlipController : ControllerBase
     //and, unlike /summary's flag counts, the specific reason(s) that VD+ballot needs
     //attention - this is what actually lets the dashboard's VD grid and needs-attention
     //list point at a VD instead of just saying "9 flagged slips" with nowhere to click.
-    private JsonArray BuildCoverage(string election, string municipality)
+    private JsonArray BuildCoverage(string election, string municipality, IMemoryCache cache)
     {
-        var registeredByVd = new Dictionary<string, string>();
-        using (MySqlConnection con = new MySqlConnection(connect))
-        {
-            con.Open();
-            using (MySqlCommand cmd = new MySqlCommand(
-                "SELECT VDNumber, WardID FROM AllVoters WHERE Municipality = @M GROUP BY VDNumber, WardID", con))
-            {
-                cmd.Parameters.AddWithValue("@M", municipality);
-                using (MySqlDataReader dr = cmd.ExecuteReader())
-                {
-                    while (dr.Read())
-                    {
-                        registeredByVd[dr["VDNumber"].ToString() ?? ""] = dr["WardID"].ToString() ?? "";
-                    }
-                }
-            }
-        }
+        var registeredByVd = GetVdRoster(municipality, cache);
 
         var statusByVdBallot = new Dictionary<(string Vd, string Ballot), (bool Confirmed, bool Unconfirmed, bool Replaced)>();
         using (MySqlConnection con = new MySqlConnection(connect))
@@ -1651,8 +1658,9 @@ public class ResultsSlipController : ControllerBase
         }
 
         var rows = new JsonArray();
-        foreach (var (vd, ward) in registeredByVd.OrderBy(kv => kv.Key))
+        foreach (var (vd, info) in registeredByVd.OrderBy(kv => kv.Key))
         {
+            var ward = info.Ward;
             var ballots = new JsonObject();
             foreach (var ballot in new[] { "ward", "pr" })
             {
