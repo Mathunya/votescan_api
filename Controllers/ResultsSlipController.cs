@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Caching.Memory;
 using MySql.Data.MySqlClient;
 using System.Data;
 using Web_Api.Models;
@@ -20,6 +21,10 @@ public class ResultsSlipController : ControllerBase
     private string? connect;
     private MySqlDataAdapter? da;
     private DataSet? ds;
+
+    //one calculation per cache key at a time; requests arriving while a key is being
+    //built wait for that calculation instead of each running the same four queries
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> SummaryGates = new();
 
     public ResultsSlipController(IConfiguration configuration)
     {
@@ -495,6 +500,149 @@ public class ResultsSlipController : ControllerBase
             }
         }
         return Ok(new { results = all, pages });
+    }
+
+    //RESULTS DASHBOARD SUMMARY FOR ONE MUNICIPALITY - party votes, ward leaders, coverage,
+    //flags and a PR seat estimate, all added up already. Cached in this server's memory
+    //for 60s per election+municipality+mode so a dashboard refreshed by many people at
+    //once costs at most one set of queries a minute per node (see the Results Slip
+    //Workflow and Seats plan, section 5). mode=confirmed (default) counts confirmed
+    //slips only; mode=all also counts auto (unconfirmed) rows.
+    [Authorize]
+    [HttpGet]
+    [Route("summary/{municipality}")]
+    public IActionResult summary(string municipality, [FromQuery] string? mode, [FromServices] IMemoryCache cache)
+    {
+        var all = mode == "all";
+        var election = ElectionName(null);
+        var key = $"slip-summary|{election}|{municipality}|{(all ? "all" : "confirmed")}";
+        if (cache.TryGetValue(key, out JsonObject? hit))
+        {
+            return Ok(hit);
+        }
+        var gate = SummaryGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        gate.Wait();
+        try
+        {
+            if (cache.TryGetValue(key, out hit))
+            {
+                return Ok(hit);
+            }
+            var result = BuildSummary(election, municipality, all);
+            cache.Set(key, result, TimeSpan.FromSeconds(60));
+            return Ok(result);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    //SAME TOTALS ADDED ACROSS A REGION'S MUNICIPALITIES. Seats are not re-estimated here
+    //(the council size is per municipality, so "seats for a region" has no meaning) -
+    //only coverage and party votes are summed. Each municipality's own summary is cached
+    //as usual, so this piggybacks on whichever of them are already warm.
+    [Authorize]
+    [HttpGet]
+    [Route("summary/region/{region}")]
+    public IActionResult summaryByRegion(string region, [FromQuery] string? mode, [FromServices] IMemoryCache cache)
+    {
+        var all = mode == "all";
+        var election = ElectionName(null);
+        var municipalities = MunicipalitiesInRegion(region);
+        if (municipalities.Count == 0)
+        {
+            return BadRequest($"Unknown region '{region}'.");
+        }
+        int vds = 0, vdsWard = 0, vdsPr = 0, vdsBoth = 0, unconfirmedSlips = 0, flaggedSlips = 0;
+        long registered = 0, registeredCounted = 0;
+        var parties = new Dictionary<string, (string Name, long WardVotes, long PrVotes)>();
+        foreach (var municipality in municipalities)
+        {
+            var key = $"slip-summary|{election}|{municipality}|{(all ? "all" : "confirmed")}";
+            if (!cache.TryGetValue(key, out JsonObject? muni))
+            {
+                muni = BuildSummary(election, municipality, all);
+                cache.Set(key, muni, TimeSpan.FromSeconds(60));
+            }
+            var c = muni!["coverage"]!.AsObject();
+            vds += c["vds"]!.GetValue<int>();
+            vdsWard += c["vdsWard"]!.GetValue<int>();
+            vdsPr += c["vdsPr"]!.GetValue<int>();
+            vdsBoth += c["vdsBoth"]!.GetValue<int>();
+            registered += c["registered"]!.GetValue<long>();
+            registeredCounted += c["registeredCounted"]!.GetValue<long>();
+            unconfirmedSlips += c["unconfirmedSlips"]!.GetValue<int>();
+            flaggedSlips += c["flaggedSlips"]!.GetValue<int>();
+            foreach (var p in muni["parties"]!.AsArray())
+            {
+                var pKey = p!["key"]!.GetValue<string>();
+                var wardVotes = p["wardVotes"]!.GetValue<long>();
+                var prVotes = p["prVotes"]!.GetValue<long>();
+                var (name, wv, pv) = parties.TryGetValue(pKey, out var existing) ? existing : (p["name"]!.GetValue<string>(), 0L, 0L);
+                parties[pKey] = (name, wv + wardVotes, pv + prVotes);
+            }
+        }
+        return Ok(new JsonObject
+        {
+            ["election"] = election,
+            ["region"] = region,
+            ["mode"] = all ? "all" : "confirmed",
+            ["generatedAt"] = DateTime.UtcNow.ToString("o"),
+            ["municipalities"] = new JsonArray(municipalities.Select(m => JsonValue.Create(m)).ToArray()),
+            ["coverage"] = new JsonObject
+            {
+                ["vds"] = vds,
+                ["vdsWard"] = vdsWard,
+                ["vdsPr"] = vdsPr,
+                ["vdsBoth"] = vdsBoth,
+                ["registered"] = registered,
+                ["registeredCounted"] = registeredCounted,
+                ["unconfirmedSlips"] = unconfirmedSlips,
+                ["flaggedSlips"] = flaggedSlips,
+            },
+            ["parties"] = new JsonArray(parties.Select(kv => (JsonNode)new JsonObject
+            {
+                ["key"] = kv.Key,
+                ["name"] = kv.Value.Name,
+                ["wardVotes"] = kv.Value.WardVotes,
+                ["prVotes"] = kv.Value.PrVotes,
+                ["totalVotes"] = kv.Value.WardVotes + kv.Value.PrVotes,
+            }).ToArray()),
+        });
+    }
+
+    //PER-VD, PER-BALLOT STATUS for the results dashboard's VD grid and its "needs
+    //attention" list. Unlike the flag *counts* in /summary, this names which VD and
+    //ballot each flag belongs to and why, so a flagged slip can actually be found and
+    //corrected rather than just counted.
+    [Authorize]
+    [HttpGet]
+    [Route("coverage/{municipality}")]
+    public IActionResult coverage(string municipality, [FromServices] IMemoryCache cache)
+    {
+        var election = ElectionName(null);
+        var key = $"slip-coverage|{election}|{municipality}";
+        if (cache.TryGetValue(key, out JsonArray? hit))
+        {
+            return Ok(hit);
+        }
+        var gate = SummaryGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        gate.Wait();
+        try
+        {
+            if (cache.TryGetValue(key, out hit))
+            {
+                return Ok(hit);
+            }
+            var result = BuildCoverage(election, municipality);
+            cache.Set(key, result, TimeSpan.FromSeconds(60));
+            return Ok(result);
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     //NAME, WARD AND MUNICIPALITY OF A VD, to check a VD number read off (or typed from) a slip
@@ -1039,6 +1187,496 @@ public class ResultsSlipController : ControllerBase
             }
         }
         return summary;
+    }
+
+    //a slip abbreviation is free text typed by a person, so "ANC", " anc" and "Anc " are
+    //the same party and should not become three near-duplicate rows. This is a partial
+    //fix for that — it merges obvious casing/whitespace variants. It cannot tell an
+    //independent candidate or a genuinely different (misspelt) party from a typo of a
+    //real one; that needs a real per-municipality party list (the plan's "Keep one party
+    //list per municipality" change), which does not exist yet.
+    private static string NormalisedPartyKey(string? raw) =>
+        (raw ?? "").Trim().ToUpperInvariant();
+
+    //municipality codes ("FS192 - Dihlabeng") for a region, discovered from the voters
+    //roll rather than hardcoded twice - reuses the same region->prefix map CanSeeVd uses.
+    private List<string> MunicipalitiesInRegion(string region)
+    {
+        var normalised = region.Trim().ToLowerInvariant();
+        if (!RegionMunicipalities.TryGetValue(normalised, out var prefixes))
+        {
+            return [];
+        }
+        var municipalities = new List<string>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            foreach (var prefix in prefixes)
+            {
+                // MAN -> "MAN - Mangaung"; this grabs the one exact code per prefix
+                // rather than guessing the full display name
+                using (MySqlCommand lookup = new MySqlCommand(
+                    "SELECT DISTINCT Municipality FROM AllVoters WHERE Municipality LIKE @Prefix LIMIT 1", con))
+                {
+                    lookup.Parameters.AddWithValue("@Prefix", prefix + "%");
+                    var found = lookup.ExecuteScalar()?.ToString();
+                    if (!string.IsNullOrEmpty(found))
+                    {
+                        municipalities.Add(found);
+                    }
+                }
+            }
+        }
+        return municipalities;
+    }
+
+    //council size/ward count for a municipality's seat estimate, or null when nobody
+    //has entered one yet (CouncilSeats, see results_summary.sql)
+    private (int Seats, int Wards, int IndependentWards)? GetCouncilSeats(string municipality)
+    {
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(
+                "SELECT Seats, Wards, IndependentWards FROM CouncilSeats WHERE Municipality = @M", con))
+            {
+                cmd.Parameters.AddWithValue("@M", municipality);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    return dr.Read()
+                        ? (Convert.ToInt32(dr["Seats"]), Convert.ToInt32(dr["Wards"]), Convert.ToInt32(dr["IndependentWards"]))
+                        : null;
+                }
+            }
+        }
+    }
+
+    //everything GET /ResultsSlip/summary/{municipality} returns: coverage, party votes,
+    //ward leaders, flags and (when CouncilSeats has a row for this municipality) the PR
+    //seat estimate. Runs the four queries from the plan's section 5 plus the VD roster;
+    //only called on a cache miss.
+    private JsonObject BuildSummary(string election, string municipality, bool all)
+    {
+        //1 - every VD in the municipality and how many registered voters it has
+        var registeredByVd = new Dictionary<string, (string Ward, long Registered)>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT VDNumber, WardID, COUNT(*) AS Registered
+                FROM AllVoters WHERE Municipality = @M
+                GROUP BY VDNumber, WardID", con))
+            {
+                cmd.Parameters.AddWithValue("@M", municipality);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        registeredByVd[dr["VDNumber"].ToString() ?? ""] =
+                            (dr["WardID"].ToString() ?? "", Convert.ToInt64(dr["Registered"]));
+                    }
+                }
+            }
+        }
+
+        //2 - which VDs have a confirmed/unconfirmed ward and PR slip live right now
+        var statusByVdBallot = new Dictionary<(string Vd, string Ballot), (bool Confirmed, bool Unconfirmed)>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT VD, Ballot,
+                       MAX(Status = 'confirmed') AS Confirmed,
+                       MAX(Status = 'auto') AS Unconfirmed
+                FROM ResultsSlip
+                WHERE Election = @E AND Municipality = @M AND IsLive = 1 AND Kind = 'slip' AND Ballot IS NOT NULL
+                GROUP BY VD, Ballot", con))
+            {
+                cmd.Parameters.AddWithValue("@E", election);
+                cmd.Parameters.AddWithValue("@M", municipality);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        statusByVdBallot[(dr["VD"].ToString() ?? "", dr["Ballot"].ToString() ?? "")] =
+                            (Convert.ToInt32(dr["Confirmed"]) > 0, Convert.ToInt32(dr["Unconfirmed"]) > 0);
+                    }
+                }
+            }
+        }
+
+        bool Counted((bool Confirmed, bool Unconfirmed) s) => s.Confirmed || (all && s.Unconfirmed);
+
+        var vds = registeredByVd.Count;
+        var registered = registeredByVd.Values.Sum(v => v.Registered);
+        var vdsWard = 0; var vdsPr = 0; var vdsBoth = 0; long registeredCounted = 0; var unconfirmedSlips = 0;
+        foreach (var (vd, info) in registeredByVd)
+        {
+            var wardOk = statusByVdBallot.TryGetValue((vd, "ward"), out var w) && Counted(w);
+            var prOk = statusByVdBallot.TryGetValue((vd, "pr"), out var p) && Counted(p);
+            if (wardOk) vdsWard++;
+            if (prOk) vdsPr++;
+            if (wardOk && prOk)
+            {
+                vdsBoth++;
+                registeredCounted += info.Registered;
+            }
+        }
+        unconfirmedSlips = statusByVdBallot.Values.Count(s => !s.Confirmed && s.Unconfirmed);
+
+        //3 - flags from the photographed pages: missing pages, illegible numbers, unknown
+        //ballot. Grouped the same way coverage() uses, so the counts here always match the
+        //reasons a VD shows up with on the needs-attention list.
+        var pagesMissing = 0; var illegible = 0; var unknownBallot = 0;
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT VD, Ballot, MAX(PageCount) AS PageCount,
+                       COUNT(DISTINCT CASE WHEN PageNo > 0 THEN PageNo END) AS Seen,
+                       MAX(CASE WHEN Reading IS NOT NULL
+                            AND JSON_CONTAINS(JSON_EXTRACT(Reading, '$.parties[*].legible'), 'false')
+                            THEN 1 ELSE 0 END) AS Illegible
+                FROM ResultsSlipImages
+                WHERE Election = @E AND VD IN (SELECT VDNumber FROM AllVoters WHERE Municipality = @M)
+                  AND Status IN ('read', 'saved')
+                GROUP BY VD, Ballot", con))
+            {
+                cmd.Parameters.AddWithValue("@E", election);
+                cmd.Parameters.AddWithValue("@M", municipality);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var pageCount = Convert.ToInt32(dr["PageCount"]);
+                        var seen = Convert.ToInt32(dr["Seen"]);
+                        var ballot = dr["Ballot"].ToString() ?? "";
+                        if (pageCount > 0 && seen < pageCount) pagesMissing++;
+                        if (Convert.ToInt32(dr["Illegible"]) > 0) illegible++;
+                        if (ballot == "unknown") unknownBallot++;
+                    }
+                }
+            }
+        }
+
+        //4 - replaced results: a second worker confirmed over an earlier confirm. Not
+        //wrong by itself, but worth a human glance since it means two different Saves
+        //disagreed about this VD and ballot.
+        var replaced = 0;
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT COUNT(DISTINCT VD, Ballot) FROM ResultsSlip
+                WHERE Election = @E AND Municipality = @M AND Kind = 'slip' AND ReplacedAt IS NOT NULL
+                  AND Status = 'confirmed'", con))
+            {
+                cmd.Parameters.AddWithValue("@E", election);
+                cmd.Parameters.AddWithValue("@M", municipality);
+                replaced = Convert.ToInt32(cmd.ExecuteScalar());
+            }
+        }
+
+        //5 - party votes per ballot (query 1 of the plan)
+        var partyRows = new List<(string Ballot, string Key, string Name, long Votes)>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT Ballot, Party_name, MAX(Candidate_name) AS Name, SUM(Votes) AS Votes
+                FROM ResultsSlip
+                WHERE Election = @E AND Municipality = @M AND IsLive = 1 AND Kind = 'slip'
+                  AND Ballot IN ('ward','pr') AND (@All = 1 OR Status = 'confirmed')
+                GROUP BY Ballot, Party_name", con))
+            {
+                cmd.Parameters.AddWithValue("@E", election);
+                cmd.Parameters.AddWithValue("@M", municipality);
+                cmd.Parameters.AddWithValue("@All", all ? 1 : 0);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        partyRows.Add((dr["Ballot"].ToString() ?? "", NormalisedPartyKey(dr["Party_name"].ToString()),
+                            dr["Name"].ToString() ?? "", Convert.ToInt64(dr["Votes"])));
+                    }
+                }
+            }
+        }
+
+        //6 - ward ballot by ward and party (query 2 of the plan); leader/runner-up and
+        //wards won are worked out in code below, from the normalised party key
+        var wardRows = new List<(string Ward, string Key, string Name, long Votes, int VdsWithVotes)>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT Ward, Party_name, MAX(Candidate_name) AS Name, SUM(Votes) AS Votes, COUNT(DISTINCT VD) AS Vds
+                FROM ResultsSlip
+                WHERE Election = @E AND Municipality = @M AND IsLive = 1 AND Kind = 'slip' AND Ballot = 'ward'
+                  AND (@All = 1 OR Status = 'confirmed')
+                GROUP BY Ward, Party_name", con))
+            {
+                cmd.Parameters.AddWithValue("@E", election);
+                cmd.Parameters.AddWithValue("@M", municipality);
+                cmd.Parameters.AddWithValue("@All", all ? 1 : 0);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        wardRows.Add((dr["Ward"].ToString() ?? "", NormalisedPartyKey(dr["Party_name"].ToString()),
+                            dr["Name"].ToString() ?? "", Convert.ToInt64(dr["Votes"]), Convert.ToInt32(dr["Vds"])));
+                    }
+                }
+            }
+        }
+
+        //wards: total VDs per ward from the roll, counted VDs per ward from the ward
+        //ballot's own coverage (not the combined ward+PR "counted" used for the strip)
+        var vdsPerWard = registeredByVd.Values.GroupBy(v => v.Ward).ToDictionary(g => g.Key, g => g.Count());
+        var countedVdsPerWard = registeredByVd
+            .Where(kv => statusByVdBallot.TryGetValue((kv.Key, "ward"), out var s) && Counted(s))
+            .GroupBy(kv => kv.Value.Ward)
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        var wards = new JsonArray();
+        var wardsWonByParty = new Dictionary<string, int>();
+        var wardsLeadingByParty = new Dictionary<string, int>();
+        foreach (var wardGroup in wardRows.GroupBy(w => w.Ward).OrderBy(g => g.Key))
+        {
+            var ranked = wardGroup.OrderByDescending(w => w.Votes).ToList();
+            var leader = ranked.FirstOrDefault();
+            var runnerUp = ranked.Skip(1).FirstOrDefault();
+            var totalVds = vdsPerWard.GetValueOrDefault(wardGroup.Key, 0);
+            var countedVds = countedVdsPerWard.GetValueOrDefault(wardGroup.Key, 0);
+            var complete = totalVds > 0 && countedVds == totalVds;
+            if (leader.Key != null)
+            {
+                if (complete)
+                {
+                    wardsWonByParty[leader.Key] = wardsWonByParty.GetValueOrDefault(leader.Key) + 1;
+                }
+                else
+                {
+                    wardsLeadingByParty[leader.Key] = wardsLeadingByParty.GetValueOrDefault(leader.Key) + 1;
+                }
+            }
+            wards.Add(new JsonObject
+            {
+                ["ward"] = wardGroup.Key,
+                ["vds"] = totalVds,
+                ["vdsCounted"] = countedVds,
+                ["leader"] = leader.Key == null ? null : new JsonObject
+                {
+                    ["party"] = leader.Key, ["name"] = leader.Name, ["votes"] = leader.Votes,
+                },
+                ["runnerUp"] = runnerUp.Key == null ? null : new JsonObject
+                {
+                    ["party"] = runnerUp.Key, ["votes"] = runnerUp.Votes,
+                },
+                ["complete"] = complete,
+            });
+        }
+
+        //parties: ward + PR votes merged by normalised key
+        var partyTotals = new Dictionary<string, (string Name, long WardVotes, long PrVotes)>();
+        foreach (var row in partyRows)
+        {
+            var (name, wardVotes, prVotes) = partyTotals.TryGetValue(row.Key, out var existing)
+                ? existing : (row.Name, 0L, 0L);
+            if (string.IsNullOrEmpty(name)) name = row.Name;
+            partyTotals[row.Key] = row.Ballot == "ward"
+                ? (name, wardVotes + row.Votes, prVotes)
+                : (name, wardVotes, prVotes + row.Votes);
+        }
+        var parties = new JsonArray();
+        foreach (var (key, info) in partyTotals.OrderByDescending(kv => kv.Value.WardVotes + kv.Value.PrVotes))
+        {
+            parties.Add(new JsonObject
+            {
+                ["key"] = key,
+                ["name"] = string.IsNullOrEmpty(info.Name) ? key : info.Name,
+                ["wardVotes"] = info.WardVotes,
+                ["prVotes"] = info.PrVotes,
+                ["totalVotes"] = info.WardVotes + info.PrVotes,
+                ["wardsWon"] = wardsWonByParty.GetValueOrDefault(key),
+                ["wardsLeading"] = wardsLeadingByParty.GetValueOrDefault(key),
+            });
+        }
+
+        //7 - seat estimate, only when someone has entered this municipality's council
+        //size (CouncilSeats); otherwise the dashboard just shows votes, as the plan says
+        JsonObject? seats = null;
+        var councilSeats = GetCouncilSeats(municipality);
+        if (councilSeats != null)
+        {
+            var inputs = partyTotals.Select(kv => new SeatEstimator.PartyInput(
+                kv.Key, (int)(kv.Value.WardVotes + kv.Value.PrVotes), wardsWonByParty.GetValueOrDefault(kv.Key)));
+            var estimate = SeatEstimator.Estimate_(councilSeats.Value.Seats, councilSeats.Value.IndependentWards, inputs);
+            seats = new JsonObject
+            {
+                ["councilSeats"] = councilSeats.Value.Seats,
+                ["independentWards"] = councilSeats.Value.IndependentWards,
+                ["quota"] = estimate.Quota,
+                ["parties"] = new JsonArray(estimate.Parties.Select(p => (JsonNode)new JsonObject
+                {
+                    ["key"] = p.Key, ["seats"] = p.Seats, ["wardSeats"] = p.WardSeats, ["prSeats"] = p.PrSeats,
+                }).ToArray()),
+            };
+        }
+
+        return new JsonObject
+        {
+            ["election"] = election,
+            ["municipality"] = municipality,
+            ["mode"] = all ? "all" : "confirmed",
+            ["generatedAt"] = DateTime.UtcNow.ToString("o"),
+            ["cacheSeconds"] = 60,
+            ["coverage"] = new JsonObject
+            {
+                ["vds"] = vds,
+                ["vdsWard"] = vdsWard,
+                ["vdsPr"] = vdsPr,
+                ["vdsBoth"] = vdsBoth,
+                ["registered"] = registered,
+                ["registeredCounted"] = registeredCounted,
+                ["unconfirmedSlips"] = unconfirmedSlips,
+                ["flaggedSlips"] = pagesMissing + illegible + unknownBallot + replaced,
+            },
+            ["parties"] = parties,
+            ["wards"] = wards,
+            ["seats"] = seats,
+            ["flags"] = new JsonObject
+            {
+                ["pagesMissing"] = pagesMissing,
+                ["illegible"] = illegible,
+                ["unknownBallot"] = unknownBallot,
+                ["replaced"] = replaced,
+            },
+        };
+    }
+
+    //GET /ResultsSlip/coverage/{municipality}: one row per VD with each ballot's status
+    //and, unlike /summary's flag counts, the specific reason(s) that VD+ballot needs
+    //attention - this is what actually lets the dashboard's VD grid and needs-attention
+    //list point at a VD instead of just saying "9 flagged slips" with nowhere to click.
+    private JsonArray BuildCoverage(string election, string municipality)
+    {
+        var registeredByVd = new Dictionary<string, string>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(
+                "SELECT VDNumber, WardID FROM AllVoters WHERE Municipality = @M GROUP BY VDNumber, WardID", con))
+            {
+                cmd.Parameters.AddWithValue("@M", municipality);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        registeredByVd[dr["VDNumber"].ToString() ?? ""] = dr["WardID"].ToString() ?? "";
+                    }
+                }
+            }
+        }
+
+        var statusByVdBallot = new Dictionary<(string Vd, string Ballot), (bool Confirmed, bool Unconfirmed, bool Replaced)>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT VD, Ballot,
+                       MAX(Status = 'confirmed' AND IsLive = 1) AS Confirmed,
+                       MAX(Status = 'auto' AND IsLive = 1) AS Unconfirmed,
+                       MAX(ReplacedAt IS NOT NULL) AS Replaced
+                FROM ResultsSlip
+                WHERE Election = @E AND Municipality = @M AND Kind = 'slip' AND Ballot IS NOT NULL
+                GROUP BY VD, Ballot", con))
+            {
+                cmd.Parameters.AddWithValue("@E", election);
+                cmd.Parameters.AddWithValue("@M", municipality);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        statusByVdBallot[(dr["VD"].ToString() ?? "", dr["Ballot"].ToString() ?? "")] =
+                            (Convert.ToInt32(dr["Confirmed"]) > 0, Convert.ToInt32(dr["Unconfirmed"]) > 0,
+                             Convert.ToInt32(dr["Replaced"]) > 0);
+                    }
+                }
+            }
+        }
+
+        var reasonsByVdBallot = new Dictionary<(string Vd, string Ballot), List<string>>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(@"
+                SELECT VD, Ballot, MAX(PageCount) AS PageCount,
+                       COUNT(DISTINCT CASE WHEN PageNo > 0 THEN PageNo END) AS Seen,
+                       MAX(CASE WHEN Reading IS NOT NULL
+                            AND JSON_CONTAINS(JSON_EXTRACT(Reading, '$.parties[*].legible'), 'false')
+                            THEN 1 ELSE 0 END) AS Illegible
+                FROM ResultsSlipImages
+                WHERE Election = @E AND VD IN (SELECT VDNumber FROM AllVoters WHERE Municipality = @M)
+                  AND Status IN ('read', 'saved')
+                GROUP BY VD, Ballot", con))
+            {
+                cmd.Parameters.AddWithValue("@E", election);
+                cmd.Parameters.AddWithValue("@M", municipality);
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var vd = dr["VD"].ToString() ?? "";
+                        var ballot = dr["Ballot"].ToString() ?? "";
+                        var reasons = reasonsByVdBallot.TryGetValue((vd, ballot), out var existing) ? existing : [];
+                        var pageCount = Convert.ToInt32(dr["PageCount"]);
+                        var seen = Convert.ToInt32(dr["Seen"]);
+                        if (pageCount > 0 && seen < pageCount)
+                        {
+                            reasons.Add($"page {seen + 1} of {pageCount} missing");
+                        }
+                        if (Convert.ToInt32(dr["Illegible"]) > 0)
+                        {
+                            reasons.Add("numbers illegible");
+                        }
+                        if (ballot == "unknown")
+                        {
+                            reasons.Add("ballot type not recognised");
+                        }
+                        reasonsByVdBallot[(vd, ballot)] = reasons;
+                    }
+                }
+            }
+        }
+
+        var rows = new JsonArray();
+        foreach (var (vd, ward) in registeredByVd.OrderBy(kv => kv.Key))
+        {
+            var ballots = new JsonObject();
+            foreach (var ballot in new[] { "ward", "pr" })
+            {
+                statusByVdBallot.TryGetValue((vd, ballot), out var status);
+                var reasons = new List<string>(reasonsByVdBallot.GetValueOrDefault((vd, ballot), []));
+                if (status.Replaced)
+                {
+                    reasons.Add("replaced by a second user");
+                }
+                var state = status.Confirmed ? "confirmed" : status.Unconfirmed ? "auto" : "missing";
+                ballots[ballot] = new JsonObject
+                {
+                    ["status"] = state,
+                    ["reasons"] = new JsonArray(reasons.Select(r => (JsonNode)JsonValue.Create(r)!).ToArray()),
+                };
+            }
+            rows.Add(new JsonObject
+            {
+                ["vd"] = vd,
+                ["ward"] = ward,
+                ["ballots"] = ballots,
+            });
+        }
+        return rows;
     }
 
     private int MaxScansPerDay() =>
