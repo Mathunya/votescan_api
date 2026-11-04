@@ -1585,7 +1585,7 @@ public class ResultsSlipController : ControllerBase
         {
             con.Open();
             using (MySqlCommand cmd = new MySqlCommand(@"
-                SELECT VD, Ballot, MAX(PageCount) AS PageCount,
+                SELECT VD, Ballot, COALESCE(MAX(PageCount), 0) AS PageCount,
                        COUNT(DISTINCT CASE WHEN PageNo > 0 THEN PageNo END) AS Seen,
                        MAX(CASE WHEN Reading IS NOT NULL
                             AND JSON_CONTAINS(JSON_EXTRACT(Reading, '$.parties[*].legible'), 'false')
@@ -1829,9 +1829,9 @@ public class ResultsSlipController : ControllerBase
             con.Open();
             using (MySqlCommand cmd = new MySqlCommand(@"
                 SELECT VD, Ballot,
-                       MAX(Status = 'confirmed' AND IsLive = 1) AS Confirmed,
-                       MAX(Status = 'auto' AND IsLive = 1) AS Unconfirmed,
-                       MAX(ReplacedAt IS NOT NULL) AS Replaced
+                       COALESCE(MAX(Status = 'confirmed' AND IsLive = 1), 0) AS Confirmed,
+                       COALESCE(MAX(Status = 'auto' AND IsLive = 1), 0) AS Unconfirmed,
+                       COALESCE(MAX(ReplacedAt IS NOT NULL), 0) AS Replaced
                 FROM ResultsSlip
                 WHERE Election = @E AND Municipality = @M AND Kind = 'slip' AND Ballot IS NOT NULL
                 GROUP BY VD, Ballot", con))
@@ -1855,7 +1855,7 @@ public class ResultsSlipController : ControllerBase
         {
             con.Open();
             using (MySqlCommand cmd = new MySqlCommand(@"
-                SELECT VD, Ballot, MAX(PageCount) AS PageCount,
+                SELECT VD, Ballot, COALESCE(MAX(PageCount), 0) AS PageCount,
                        COUNT(DISTINCT CASE WHEN PageNo > 0 THEN PageNo END) AS Seen,
                        MAX(CASE WHEN Reading IS NOT NULL
                             AND JSON_CONTAINS(JSON_EXTRACT(Reading, '$.parties[*].legible'), 'false')
