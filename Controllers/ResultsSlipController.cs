@@ -886,11 +886,13 @@ public class ResultsSlipController : ControllerBase
     private static string DigitsOnly(string? value) =>
         new string((value ?? "").Where(char.IsDigit).ToArray());
 
-    //ward | pr | district | unknown
+    //ward | pr | district - defaults to ward when the slip's own heading doesn't say
+    //(was "unknown", which excluded the slip from every count on the dashboard until a
+    //person corrected it by hand; most slips read this way are in fact ward ballots)
     private static string NormaliseBallot(string? ballot)
     {
         var b = (ballot ?? "").Trim().ToLowerInvariant();
-        return b is "ward" or "pr" or "district" ? b : "unknown";
+        return b is "pr" or "district" ? b : "ward";
     }
 
     //"…1234": enough to recognise a colleague, not a full cell number
