@@ -602,7 +602,7 @@ public class ResultsSlipController : ControllerBase
                 {
                     while (dr.Read())
                     {
-                        var key = (dr["Party_name"].ToString() ?? "").Trim().ToUpperInvariant();
+                        var key = NormalisedPartyKey(dr["Party_name"].ToString());
                         var name = dr["Name"].ToString() ?? "";
                         var votes = Convert.ToInt64(dr["Votes"]);
                         var (existingName, existingVotes) = byKey.TryGetValue(key, out var e) ? e : ("", 0L);
@@ -1280,14 +1280,61 @@ public class ResultsSlipController : ControllerBase
         return summary;
     }
 
+    //the OCR reads a ward slip's abbreviation column ("ANC") but a PR slip has no
+    //abbreviation column at all, only the full party name ("AFRICAN NATIONAL
+    //CONGRESS") — so PartyKey() falls back to that full name for PR rows. Without
+    //this map, a party's ward votes and PR votes land under two entirely different
+    //keys and never combine into one party anywhere (Party votes, ward winners, the
+    //seat estimate). Built from the full names actually seen on real 2026 slips so
+    //far rather than typed out from memory; a party not listed here yet (because
+    //neither ballot has produced one of these two forms for it yet, or its full
+    //name was OCR'd slightly differently) still won't merge until it's added.
+    private static readonly Dictionary<string, string> PartyFullNameToAbbreviation = new()
+    {
+        ["AFRICAN NATIONAL CONGRESS"] = "ANC",
+        ["DEMOCRATIC ALLIANCE"] = "DA",
+        ["ECONOMIC FREEDOM FIGHTERS"] = "EFF",
+        ["INKATHA FREEDOM PARTY"] = "IFP",
+        ["VRYHEIDSFRONT PLUS | FREEDOM FRONT PLUS"] = "VF PLUS",
+        ["CONGRESS OF THE PEOPLE"] = "COPE",
+        ["UNITED CHRISTIAN DEMOCRATIC PARTY"] = "UCDP",
+        ["AFRICAN CHRISTIAN DEMOCRATIC PARTY"] = "ACDP",
+        ["PAN AFRICANIST CONGRESS OF AZANIA"] = "PAC",
+        ["UMKHONTO WESIZWE PARTY"] = "MKP",
+        ["BUILD ONE SOUTH AFRICA"] = "BOSA",
+        ["PATRIOTIC ALLIANCE"] = "PA",
+        ["AFRICAN TRANSFORMATION MOVEMENT"] = "ATM",
+        ["AFRICAN PEOPLE'S CONVENTION"] = "APC",
+        ["SOUTH AFRICAN COMMUNIST PARTY"] = "SACP",
+        ["LABOUR PARTY OF SOUTH AFRICA"] = "LABOUR",
+        ["UNITED RESIDENTS FRONT"] = "URF",
+        ["AFRICAN ALLIANCE CONGRESS"] = "AAC",
+        ["AFRICAN CULTURAL IDENTITY MOVEMENT"] = "ACIM",
+        ["AFRICAN HEART CONGRESS"] = "AHC",
+        ["AFRICAN INDEPENDENT CONGRESS"] = "AIC",
+        ["AFRICAN CONGRESS FOR TRANSFORMATION"] = "ACT",
+        ["ACTIVE AFRICAN CHRISTIANS UNITED MOVEMENT"] = "AACUM",
+        ["AFRIKA MAYIBUYE MOVEMENT"] = "MAYIBUYE",
+        ["AFRIKAN ALLIANCE OF SOCIAL DEMOCRATS"] = "AASD",
+        ["MANGAUNG SEVEN PEOPLE'S VOICE"] = "MSPV",
+        ["NATIONAL SERVICE DELIVERY FORUM"] = "NSDF",
+        ["PEOPLE'S MOVEMENT FOR CHANGE"] = "PMC",
+        ["SOUTH AFRICAN ROYAL KINGDOMS ORGANIZATION"] = "SARKO",
+        ["SIZWE UMMAH NATION"] = "SUN",
+    };
+
     //a slip abbreviation is free text typed by a person, so "ANC", " anc" and "Anc " are
-    //the same party and should not become three near-duplicate rows. This is a partial
-    //fix for that — it merges obvious casing/whitespace variants. It cannot tell an
-    //independent candidate or a genuinely different (misspelt) party from a typo of a
-    //real one; that needs a real per-municipality party list (the plan's "Keep one party
-    //list per municipality" change), which does not exist yet.
-    private static string NormalisedPartyKey(string? raw) =>
-        (raw ?? "").Trim().ToUpperInvariant();
+    //the same party and should not become three near-duplicate rows. This merges
+    //casing/whitespace variants, then the full-name alias above, so "ANC" (from a ward
+    //slip) and "AFRICAN NATIONAL CONGRESS" (from a PR slip) land on the same key. It
+    //cannot tell an independent candidate or a genuinely different (misspelt) party
+    //from a typo of a real one; that needs a real per-municipality party list (the
+    //plan's "Keep one party list per municipality" change), which does not exist yet.
+    private static string NormalisedPartyKey(string? raw)
+    {
+        var key = (raw ?? "").Trim().ToUpperInvariant();
+        return PartyFullNameToAbbreviation.TryGetValue(key, out var abbr) ? abbr : key;
+    }
 
     //municipality codes ("FS192 - Dihlabeng") for a region, discovered from the voters
     //roll rather than hardcoded twice - reuses the same region->prefix map CanSeeVd uses.
