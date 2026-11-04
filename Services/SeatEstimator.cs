@@ -4,13 +4,16 @@ namespace Web_Api.Services;
 // Municipal Structures Act 117 of 1998 (as amended), per the IEC's own "2021 Local
 // Government Elections - Electoral System" training deck (slides 12-16; the Act itself
 // hasn't changed since, so the same steps apply for 2026):
-//   quota  = floor(party votes, ward+PR / (council seats - independent-won wards)) + 1
-//   seats  = floor(party votes, ward+PR / quota), remaining seats to the largest remainders
+//   quota  = floor(party PR votes / (council seats - independent-won wards)) + 1
+//   seats  = floor(party PR votes / quota), remaining seats to the largest remainders
 //   PR     = total seats - ward seats won
-// An earlier version of this file divided by (seats - independents + 1) — a generic
-// Droop quota, copied from this project's own planning doc rather than the Act — which
-// gave a materially different (and wrong) quota; verified against the deck's own worked
-// example (35,000 votes, 21 seats, 4 independent wards -> quota 2,059) and corrected.
+// Quota and allocation run on each party's PR-ballot votes only, not ward+PR combined —
+// ward seats are already decided separately (whoever wins each ward), so folding ward
+// votes into the PR quota math would double-count them. An earlier version of this file
+// divided by (seats - independents + 1) — a generic Droop quota, copied from this
+// project's own planning doc rather than the Act — which gave a materially different
+// (and wrong) quota; verified against the deck's own worked example (35,000 votes, 21
+// seats, 4 independent wards -> quota 2,059) and corrected.
 //
 // Overhang (a party that already won more wards than its vote share would give it keeps
 // those wards, takes no PR seat, and is removed from the pool so quota/remainder math
@@ -57,27 +60,28 @@ public static class SeatEstimator
         // in the removal logic turning this into an infinite loop.
         for (var guard = 0; guard <= pool.Count; guard++)
         {
-            var totalVotes = pool.Sum(p => p.TotalVotes);
-            // Schedule 1: quota = floor(total party votes / (council seats - independent
-            // wards)) + 1 — the +1 applies to the quotient, not the denominator.
-            quota = totalVotes > 0 && seatsToShare > 0
-                ? (totalVotes / seatsToShare) + 1
+            var totalPrVotes = pool.Sum(p => p.PrVotes);
+            // Schedule 1: quota = floor(total party PR votes / (council seats -
+            // independent wards)) + 1 — the +1 applies to the quotient, not the
+            // denominator.
+            quota = totalPrVotes > 0 && seatsToShare > 0
+                ? (totalPrVotes / seatsToShare) + 1
                 : 0;
 
             var allocations = pool.Select(p => new
             {
                 p.Key,
-                p.TotalVotes,
+                p.PrVotes,
                 p.WardsWon,
-                BaseSeats = quota > 0 ? p.TotalVotes / quota : 0,
-                Remainder = quota > 0 ? p.TotalVotes % quota : 0,
+                BaseSeats = quota > 0 ? p.PrVotes / quota : 0,
+                Remainder = quota > 0 ? p.PrVotes % quota : 0,
             }).ToList();
 
             var seatsAllocated = allocations.Sum(a => a.BaseSeats);
             var remaining = Math.Max(0, seatsToShare - seatsAllocated);
             var byRemainder = allocations
                 .OrderByDescending(a => a.Remainder)
-                .ThenByDescending(a => a.TotalVotes)
+                .ThenByDescending(a => a.PrVotes)
                 .ToList();
             var bonus = byRemainder.Take(remaining).Select(a => a.Key).ToHashSet();
 
