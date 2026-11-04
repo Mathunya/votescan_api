@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using MySql.Data.MySqlClient;
+using MySqlConnector;
 
 namespace Web_Api.Services;
 

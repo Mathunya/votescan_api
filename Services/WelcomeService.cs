@@ -1,5 +1,5 @@
 using Microsoft.AspNetCore.SignalR;
-using MySql.Data.MySqlClient;
+using MySqlConnector;
 
 namespace Web_Api.Services;
 
