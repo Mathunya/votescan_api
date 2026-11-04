@@ -1662,7 +1662,16 @@ public class ResultsSlipController : ControllerBase
         {
             var ward = info.Ward;
             var ballots = new JsonObject();
-            foreach (var ballot in new[] { "ward", "pr" })
+            // Always show ward/pr as the two columns the VD grid expects, but also pick
+            // up any other ballot value this VD actually has data for - chiefly
+            // "unknown" (a slip whose ballot type the reader couldn't tell), which
+            // otherwise has a real reason recorded above (reasonsByVdBallot) that never
+            // reached the response: a VD with only an unknown-ballot slip showed no
+            // flag at all here, even though /summary's aggregate counts it.
+            var ballotKeys = new HashSet<string> { "ward", "pr" };
+            foreach (var key in statusByVdBallot.Keys.Where(k => k.Vd == vd).Select(k => k.Ballot)) ballotKeys.Add(key);
+            foreach (var key in reasonsByVdBallot.Keys.Where(k => k.Vd == vd).Select(k => k.Ballot)) ballotKeys.Add(key);
+            foreach (var ballot in ballotKeys)
             {
                 statusByVdBallot.TryGetValue((vd, ballot), out var status);
                 var reasons = new List<string>(reasonsByVdBallot.GetValueOrDefault((vd, ballot), []));
