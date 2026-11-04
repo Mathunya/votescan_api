@@ -547,6 +547,80 @@ public class ResultsSlipController : ControllerBase
         }
     }
 
+    //district-ballot ('district') party votes for a whole region at once - this is
+    //the district council's own 40% directly-elected PR ballot, not any municipality's
+    //ward/PR ballots, so it's cached per-region rather than reusing the per-municipality
+    //cache/gate summary() and summaryByRegion() share.
+    private async Task<JsonArray> GetOrBuildDistrictPartiesAsync(
+        string election, string region, List<string> municipalities, bool all, IMemoryCache cache)
+    {
+        var key = $"slip-district|{election}|{region}|{(all ? "all" : "confirmed")}";
+        if (cache.TryGetValue(key, out JsonArray? hit))
+        {
+            return hit!;
+        }
+        var gate = SummaryGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+            if (cache.TryGetValue(key, out hit))
+            {
+                return hit!;
+            }
+            var result = BuildDistrictParties(election, municipalities, all);
+            cache.Set(key, result, TimeSpan.FromSeconds(60));
+            return result;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private JsonArray BuildDistrictParties(string election, List<string> municipalities, bool all)
+    {
+        var byKey = new Dictionary<string, (string Name, long Votes)>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            var placeholders = string.Join(",", municipalities.Select((_, i) => $"@M{i}"));
+            using (MySqlCommand cmd = new MySqlCommand($@"
+                SELECT Party_name, MAX(Candidate_name) AS Name, SUM(Votes) AS Votes
+                FROM ResultsSlip
+                WHERE Election = @E AND IsLive = 1 AND Kind = 'slip' AND Ballot = 'district'
+                  AND (@All = 1 OR Status = 'confirmed')
+                  AND Municipality IN ({placeholders})
+                GROUP BY Party_name", con))
+            {
+                cmd.Parameters.AddWithValue("@E", election);
+                cmd.Parameters.AddWithValue("@All", all ? 1 : 0);
+                for (var i = 0; i < municipalities.Count; i++)
+                {
+                    cmd.Parameters.AddWithValue($"@M{i}", municipalities[i]);
+                }
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var key = (dr["Party_name"].ToString() ?? "").Trim().ToUpperInvariant();
+                        var name = dr["Name"].ToString() ?? "";
+                        var votes = Convert.ToInt64(dr["Votes"]);
+                        var (existingName, existingVotes) = byKey.TryGetValue(key, out var e) ? e : ("", 0L);
+                        byKey[key] = (string.IsNullOrEmpty(existingName) ? name : existingName, existingVotes + votes);
+                    }
+                }
+            }
+        }
+        return new JsonArray(byKey
+            .OrderByDescending(kv => kv.Value.Votes)
+            .Select(kv => (JsonNode)new JsonObject
+            {
+                ["key"] = kv.Key,
+                ["name"] = string.IsNullOrEmpty(kv.Value.Name) ? kv.Key : kv.Value.Name,
+                ["totalVotes"] = kv.Value.Votes,
+            }).ToArray());
+    }
+
     //SAME TOTALS ADDED ACROSS A REGION'S MUNICIPALITIES. Seats are not re-estimated here
     //(the council size is per municipality, so "seats for a region" has no meaning) -
     //only coverage and party votes are summed. Each municipality's own summary goes
@@ -588,6 +662,7 @@ public class ResultsSlipController : ControllerBase
                 parties[pKey] = (name, wv + wardVotes, pv + prVotes);
             }
         }
+        var districtParties = await GetOrBuildDistrictPartiesAsync(election, region, municipalities, all, cache);
         return Ok(new JsonObject
         {
             ["election"] = election,
@@ -614,6 +689,15 @@ public class ResultsSlipController : ControllerBase
                 ["prVotes"] = kv.Value.PrVotes,
                 ["totalVotes"] = kv.Value.WardVotes + kv.Value.PrVotes,
             }).ToArray()),
+            // The district council's own 40% directly-elected PR ballot (Ballot =
+            // 'district') - party-only, like any PR ballot, and inherently
+            // region-wide rather than tied to one municipality, so it's summed once
+            // here rather than appearing in any single municipality's own summary.
+            // The other 60% of a district council is appointed from local councils'
+            // own composition (Schedule 2) - not calculated here, since that needs
+            // every local council in the district to have final seat results first,
+            // which this system has no reliable way to know this early in counting.
+            ["districtParties"] = districtParties,
         });
     }
 
