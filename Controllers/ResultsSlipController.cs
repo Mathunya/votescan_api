@@ -1585,13 +1585,19 @@ public class ResultsSlipController : ControllerBase
             });
         }
 
-        //parties: ward + PR votes merged by normalised key
+        //parties: ward + PR votes merged by normalised key. Only the PR row's own
+        //"name" is trustworthy as the party's name here — a PR slip lists just the
+        //party, no candidate. A ward slip's "name" is really the candidate printed
+        //for that party in one specific ward, so it's never used even as a fallback;
+        //without a PR row yet, ["name"] below falls back to the party key itself
+        //(e.g. "ANC") instead of showing one ward candidate's name as if it were the
+        //whole party.
         var partyTotals = new Dictionary<string, (string Name, long WardVotes, long PrVotes)>();
         foreach (var row in partyRows)
         {
             var (name, wardVotes, prVotes) = partyTotals.TryGetValue(row.Key, out var existing)
-                ? existing : (row.Name, 0L, 0L);
-            if (string.IsNullOrEmpty(name)) name = row.Name;
+                ? existing : ("", 0L, 0L);
+            if (row.Ballot == "pr") name = row.Name;
             partyTotals[row.Key] = row.Ballot == "ward"
                 ? (name, wardVotes + row.Votes, prVotes)
                 : (name, wardVotes, prVotes + row.Votes);
