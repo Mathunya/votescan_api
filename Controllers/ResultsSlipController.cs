@@ -799,7 +799,7 @@ public class ResultsSlipController : ControllerBase
         {
             con.Open();
             using (MySqlCommand cmd = new MySqlCommand(@"
-                SELECT Id, VD, Election, Day, UploadedBy, CreatedAt FROM ResultsSlipImages
+                SELECT Id, VD, Election, Day, Ballot, UploadedBy, CreatedAt FROM ResultsSlipImages
                 WHERE VD = @VD ORDER BY CreatedAt DESC", con))
             {
                 cmd.Parameters.AddWithValue("@VD", vd);
@@ -813,6 +813,9 @@ public class ResultsSlipController : ControllerBase
                             vd = dr["VD"].ToString(),
                             election = dr["Election"].ToString(),
                             day = dr["Day"].ToString(),
+                            // the ballot type isn't known until the OCR reads it, so this can
+                            // be "" for a just-uploaded, not-yet-read image
+                            ballot = dr["Ballot"].ToString(),
                             uploadedBy = showUploader ? dr["UploadedBy"].ToString() : null,
                             createdAt = dr["CreatedAt"].ToString(),
                         });
