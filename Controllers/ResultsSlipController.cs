@@ -235,7 +235,102 @@ public class ResultsSlipController : ControllerBase
         }
         return all.ToArray();
     }
-     [HttpPost]
+     //OFFICIAL IEC PR-BALLOT RESULTS for a set of municipalities (LGE 2026 Results
+    //Report). One row per VD per party. The frontend rolls these up into
+    //province/region/municipality/ward/VD sections itself, same pattern as
+    //Reports/getdailycanvassing + getvdroll for the Movement report.
+    [HttpGet]
+    [Route("iecpr")]
+    public IActionResult getIecPr([FromQuery] string municipalities)
+    {
+        var codes = (municipalities ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (codes.Length == 0)
+        {
+            return Ok(Array.Empty<object>());
+        }
+        var all = new List<object>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            var placeholders = string.Join(",", codes.Select((c, i) => $"@m{i}"));
+            using (MySqlCommand cmd = new MySqlCommand(
+                $@"SELECT Municipality, Ward, VD, VotingStationName, RegisteredVoters, PartyName, TotalValidVotes
+                   FROM ResultsOfficial
+                   WHERE BallotType = 'PR' AND Municipality IN ({placeholders})", con))
+            {
+                for (int i = 0; i < codes.Length; i++)
+                {
+                    cmd.Parameters.AddWithValue($"@m{i}", codes[i]);
+                }
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        all.Add(new
+                        {
+                            municipality = dr["Municipality"].ToString(),
+                            ward = dr["Ward"].ToString(),
+                            vd = dr["VD"].ToString(),
+                            vdName = dr["VotingStationName"].ToString(),
+                            registeredVoters = dr["RegisteredVoters"] is DBNull ? 0 : Convert.ToInt32(dr["RegisteredVoters"]),
+                            party = dr["PartyName"].ToString(),
+                            votes = dr["TotalValidVotes"] is DBNull ? 0 : Convert.ToInt32(dr["TotalValidVotes"]),
+                        });
+                    }
+                }
+            }
+        }
+        return Ok(all);
+    }
+
+    //OUR OWN ELECTION-DAY SLIP CAPTURES (PR ballot), same municipality scope as
+    //getIecPr above, so the LGE Results Report can compare what our slips said
+    //to what the IEC's official count says.
+    [HttpGet]
+    [Route("electionday")]
+    public IActionResult getElectionDay([FromQuery] string municipalities, [FromQuery] string election = "LocaL Goverment Elections 2026")
+    {
+        var codes = (municipalities ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (codes.Length == 0)
+        {
+            return Ok(Array.Empty<object>());
+        }
+        var all = new List<object>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            var placeholders = string.Join(",", codes.Select((c, i) => $"@m{i}"));
+            using (MySqlCommand cmd = new MySqlCommand(
+                $@"SELECT Municipality, Ward, VD, Party_name, Votes
+                   FROM ResultsSlip
+                   WHERE Election = @Election AND IsLive = 1 AND Kind = 'slip' AND LOWER(Ballot) = 'pr'
+                   AND Municipality IN ({placeholders})", con))
+            {
+                cmd.Parameters.AddWithValue("@Election", election);
+                for (int i = 0; i < codes.Length; i++)
+                {
+                    cmd.Parameters.AddWithValue($"@m{i}", codes[i]);
+                }
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        all.Add(new
+                        {
+                            municipality = dr["Municipality"].ToString(),
+                            ward = dr["Ward"].ToString(),
+                            vd = dr["VD"].ToString(),
+                            party = dr["Party_name"].ToString(),
+                            votes = dr["Votes"] is DBNull ? 0 : Convert.ToInt32(dr["Votes"]),
+                        });
+                    }
+                }
+            }
+        }
+        return Ok(all);
+    }
+
+    [HttpPost]
     public int addSlip(ResultsSlip slip)
     {
         var retCode = 0;
