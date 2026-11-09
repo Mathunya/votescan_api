@@ -244,6 +244,7 @@ public class ResultsSlipController : ControllerBase
     //Report). One row per VD per party. The frontend rolls these up into
     //province/region/municipality/ward/VD sections itself, same pattern as
     //Reports/getdailycanvassing + getvdroll for the Movement report.
+    [Authorize]
     [HttpGet]
     [Route("iecpr")]
     public IActionResult getIecPr([FromQuery] string municipalities)
@@ -291,6 +292,7 @@ public class ResultsSlipController : ControllerBase
     //OUR OWN ELECTION-DAY SLIP CAPTURES (PR ballot), same municipality scope as
     //getIecPr above, so the LGE Results Report can compare what our slips said
     //to what the IEC's official count says.
+    [Authorize]
     [HttpGet]
     [Route("electionday")]
     public IActionResult getElectionDay([FromQuery] string municipalities, [FromQuery] string election = "LocaL Goverment Elections 2026")
