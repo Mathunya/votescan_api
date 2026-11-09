@@ -22,6 +22,8 @@ builder.WebHost.ConfigureKestrel(options =>
 // Configure your default endpoint
 
 builder.Services.AddControllers();
+// backs the 60s results-summary cache (ResultsSlipController: summary/coverage)
+builder.Services.AddMemoryCache();
 // add SignalR
 builder.Services.AddSignalR();
 // used to call the WhatsApp Cloud API

@@ -1,5 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
-using MySql.Data.MySqlClient;
+using MySqlConnector;
 using System.Data;
 using Web_Api.Models;
 //OLD IP 156.38.171.132
