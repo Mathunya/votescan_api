@@ -1,19 +1,25 @@
 namespace Web_Api.Services;
 
 // PR seat estimate from captured slips, following Schedule 1 of the Local Government:
-// Municipal Structures Act 117 of 1998 (as amended), per the IEC's own "2021 Local
-// Government Elections - Electoral System" training deck (slides 12-16; the Act itself
-// hasn't changed since, so the same steps apply for 2026):
-//   quota  = floor(party PR votes / (council seats - independent-won wards)) + 1
-//   seats  = floor(party PR votes / quota), remaining seats to the largest remainders
+// Municipal Structures Act 117 of 1998 (as amended):
+//   quota  = floor(party ward+PR votes / (council seats - independent-won wards -
+//            wards won by parties with no PR list)) + 1
+//   seats  = floor(party ward+PR votes / quota), remaining seats to the largest remainders
 //   PR     = total seats - ward seats won
-// Quota and allocation run on each party's PR-ballot votes only, not ward+PR combined —
-// ward seats are already decided separately (whoever wins each ward), so folding ward
-// votes into the PR quota math would double-count them. An earlier version of this file
-// divided by (seats - independents + 1) — a generic Droop quota, copied from this
-// project's own planning doc rather than the Act — which gave a materially different
-// (and wrong) quota; verified against the deck's own worked example (35,000 votes, 21
-// seats, 4 independent wards -> quota 2,059) and corrected.
+// Quota and allocation run on each party's ward+PR votes combined, NOT PR-ballot votes
+// alone. A previous version of this file used PR-only votes, reasoning that ward seats
+// are decided separately so folding ward votes in would double-count them; that
+// reasoning was wrong — the Act's own quota pools ward and PR votes together before
+// allocating, it's the SEATS (ward vs PR) that are kept separate, not the votes that
+// size the quota. Verified against the IEC's own "Seat Calculation Detail" reports for
+// all 19 Free State municipalities in the 2026 Local Government Elections: every one
+// states a party's "Total Valid Votes" as ward+PR combined (e.g. Moqhaka: ANC listed at
+// 26,506 = 13,200 ward + 13,306 PR, not 13,306 alone), and every municipality's quota
+// reproduces exactly from that combined total — e.g. Moqhaka Q=1,841 from A=73,610
+// (ward+PR for all PR-listed parties) over B=40 seats, not from the PR-only total of
+// ~37,128. An earlier version before that divided by (seats - independents + 1) — a
+// generic Droop quota, copied from this project's own planning doc rather than the Act —
+// which gave a materially different (and also wrong) quota.
 //
 // Overhang (a party that already won more wards than its vote share would give it keeps
 // those wards, takes no PR seat, and is removed from the pool so quota/remainder math
@@ -60,28 +66,28 @@ public static class SeatEstimator
         // in the removal logic turning this into an infinite loop.
         for (var guard = 0; guard <= pool.Count; guard++)
         {
-            var totalPrVotes = pool.Sum(p => p.PrVotes);
-            // Schedule 1: quota = floor(total party PR votes / (council seats -
-            // independent wards)) + 1 — the +1 applies to the quotient, not the
-            // denominator.
-            quota = totalPrVotes > 0 && seatsToShare > 0
-                ? (totalPrVotes / seatsToShare) + 1
+            var totalVotes = pool.Sum(p => p.TotalVotes);
+            // Schedule 1: quota = floor(total party ward+PR votes / (council seats -
+            // independent/no-PR-list wards)) + 1 — the +1 applies to the quotient, not
+            // the denominator.
+            quota = totalVotes > 0 && seatsToShare > 0
+                ? (totalVotes / seatsToShare) + 1
                 : 0;
 
             var allocations = pool.Select(p => new
             {
                 p.Key,
-                p.PrVotes,
+                p.TotalVotes,
                 p.WardsWon,
-                BaseSeats = quota > 0 ? p.PrVotes / quota : 0,
-                Remainder = quota > 0 ? p.PrVotes % quota : 0,
+                BaseSeats = quota > 0 ? p.TotalVotes / quota : 0,
+                Remainder = quota > 0 ? p.TotalVotes % quota : 0,
             }).ToList();
 
             var seatsAllocated = allocations.Sum(a => a.BaseSeats);
             var remaining = Math.Max(0, seatsToShare - seatsAllocated);
             var byRemainder = allocations
                 .OrderByDescending(a => a.Remainder)
-                .ThenByDescending(a => a.PrVotes)
+                .ThenByDescending(a => a.TotalVotes)
                 .ToList();
             var bonus = byRemainder.Take(remaining).Select(a => a.Key).ToHashSet();
 
