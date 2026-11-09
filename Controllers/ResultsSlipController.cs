@@ -240,8 +240,11 @@ public class ResultsSlipController : ControllerBase
         }
         return all.ToArray();
     }
-     //OFFICIAL IEC PR-BALLOT RESULTS for a set of municipalities (LGE 2026 Results
-    //Report). One row per VD per party. The frontend rolls these up into
+     //OFFICIAL IEC RESULTS for a set of municipalities (LGE 2026 Results Report).
+    //One row per VD per party per ballot (Ward and PR, summed together by the
+    //frontend) — ward+PR combined, not PR alone, matching the quota formula
+    //verified against the IEC's own Seat Calculation Detail reports (see
+    //SeatEstimator.cs). The frontend rolls these up into
     //province/region/municipality/ward/VD sections itself, same pattern as
     //Reports/getdailycanvassing + getvdroll for the Movement report.
     [Authorize]
@@ -262,7 +265,7 @@ public class ResultsSlipController : ControllerBase
             using (MySqlCommand cmd = new MySqlCommand(
                 $@"SELECT Municipality, Ward, VD, VotingStationName, RegisteredVoters, PartyName, TotalValidVotes
                    FROM ResultsOfficial
-                   WHERE BallotType = 'PR' AND Municipality IN ({placeholders})", con))
+                   WHERE BallotType IN ('Ward', 'PR') AND Municipality IN ({placeholders})", con))
             {
                 for (int i = 0; i < codes.Length; i++)
                 {
@@ -325,9 +328,12 @@ public class ResultsSlipController : ControllerBase
         return Ok(all);
     }
 
-    //OUR OWN ELECTION-DAY SLIP CAPTURES (PR ballot), same municipality scope as
-    //getIecPr above, so the LGE Results Report can compare what our slips said
-    //to what the IEC's official count says.
+    //OUR OWN ELECTION-DAY SLIP CAPTURES (Ward+PR combined, same as getIecPr),
+    //same municipality scope, so the LGE Results Report can compare what our
+    //slips said to what the IEC's official count says. Most of what's actually
+    //been captured so far is Ward-ballot (candidate-level) rows — a PR-only
+    //filter here was returning almost nothing (e.g. Mangaung: 5 PR rows vs
+    //5,892 Ward rows), which is why "Scanned" looked far too low.
     [Authorize]
     [HttpGet]
     [Route("electionday")]
@@ -346,7 +352,7 @@ public class ResultsSlipController : ControllerBase
             using (MySqlCommand cmd = new MySqlCommand(
                 $@"SELECT Municipality, Ward, VD, Party_name, Votes
                    FROM ResultsSlip
-                   WHERE Election = @Election AND IsLive = 1 AND Kind = 'slip' AND LOWER(Ballot) = 'pr'
+                   WHERE Election = @Election AND IsLive = 1 AND Kind = 'slip' AND LOWER(Ballot) IN ('ward', 'pr')
                    AND Municipality IN ({placeholders})", con))
             {
                 cmd.Parameters.AddWithValue("@Election", election);
