@@ -240,11 +240,19 @@ public class ResultsSlipController : ControllerBase
         }
         return all.ToArray();
     }
-     //OFFICIAL IEC RESULTS for a set of municipalities (LGE 2026 Results Report).
-    //One row per VD per party per ballot (Ward and PR, summed together by the
-    //frontend) — ward+PR combined, not PR alone, matching the quota formula
-    //verified against the IEC's own Seat Calculation Detail reports (see
-    //SeatEstimator.cs). The frontend rolls these up into
+     //OFFICIAL IEC PR-BALLOT RESULTS for a set of municipalities (LGE 2026 Results
+    //Report). One row per VD per party. PR-only, not Ward+PR combined: this feeds
+    //"IEC total votes" comparisons against headcounts (Canvassed/Scanned from
+    //FrontDesk/RecordedVoters), and every voter casts both a ward and a PR ballot,
+    //so summing the two would double-count against a count of people. A combined
+    //Ward+PR total is still correct for seat allocation (that's a separate, already
+    //right calculation in MunicipalitySeatAllocation/SeatEstimator.cs) and would be
+    //correct here too for vote share IF party names were matched first — ward slips
+    //mostly hold abbreviations ("ANC"), PR slips and this table hold full names
+    //("AFRICAN NATIONAL CONGRESS"), and naive combining split them into two rows.
+    //Reverted from a Ward+PR version per review (see commit history): matched
+    //against production data, not just the PR row count I'd estimated from a
+    //getall dump with no Ballot column. The frontend rolls these up into
     //province/region/municipality/ward/VD sections itself, same pattern as
     //Reports/getdailycanvassing + getvdroll for the Movement report.
     [Authorize]
@@ -265,7 +273,7 @@ public class ResultsSlipController : ControllerBase
             using (MySqlCommand cmd = new MySqlCommand(
                 $@"SELECT Municipality, Ward, VD, VotingStationName, RegisteredVoters, PartyName, TotalValidVotes
                    FROM ResultsOfficial
-                   WHERE BallotType IN ('Ward', 'PR') AND Municipality IN ({placeholders})", con))
+                   WHERE BallotType = 'PR' AND Municipality IN ({placeholders})", con))
             {
                 for (int i = 0; i < codes.Length; i++)
                 {
@@ -328,12 +336,15 @@ public class ResultsSlipController : ControllerBase
         return Ok(all);
     }
 
-    //OUR OWN ELECTION-DAY SLIP CAPTURES (Ward+PR combined, same as getIecPr),
-    //same municipality scope, so the LGE Results Report can compare what our
-    //slips said to what the IEC's official count says. Most of what's actually
-    //been captured so far is Ward-ballot (candidate-level) rows — a PR-only
-    //filter here was returning almost nothing (e.g. Mangaung: 5 PR rows vs
-    //5,892 Ward rows), which is why "Scanned" looked far too low.
+    //OUR OWN ELECTION-DAY SLIP CAPTURES (PR ballot only, same as getIecPr above),
+    //same municipality scope, so the page can compare what our slips said to the
+    //IEC's official count on an apples-to-apples basis. PR-only for the same
+    //reason as getIecPr: ward slips mostly hold party abbreviations ("ANC")
+    //while PR slips hold full names ("AFRICAN NATIONAL CONGRESS"), so combining
+    //without matching names first splits one party into two rows — and the LGE
+    //2026 Results Report doesn't actually call this endpoint any more (it uses
+    //FrontDesk/RecordedVoters for Canvassed/Scanned instead), so there's no
+    //live caller depending on Ward+PR combined behaviour here.
     [Authorize]
     [HttpGet]
     [Route("electionday")]
@@ -352,7 +363,7 @@ public class ResultsSlipController : ControllerBase
             using (MySqlCommand cmd = new MySqlCommand(
                 $@"SELECT Municipality, Ward, VD, Party_name, Votes
                    FROM ResultsSlip
-                   WHERE Election = @Election AND IsLive = 1 AND Kind = 'slip' AND LOWER(Ballot) IN ('ward', 'pr')
+                   WHERE Election = @Election AND IsLive = 1 AND Kind = 'slip' AND LOWER(Ballot) = 'pr'
                    AND Municipality IN ({placeholders})", con))
             {
                 cmd.Parameters.AddWithValue("@Election", election);
