@@ -289,6 +289,42 @@ public class ResultsSlipController : ControllerBase
         return Ok(all);
     }
 
+    //OFFICIAL COUNCIL SEAT ALLOCATION per municipality per party (MunicipalitySeatAllocation
+    //— computed from the IEC's own "Seat Calculation Detail" reports, not estimated from
+    //captured slips). Small table (19 municipalities), always returned in full; the
+    //frontend filters/aggregates it client-side alongside iecpr.
+    [Authorize]
+    [HttpGet]
+    [Route("seats")]
+    public IActionResult getSeats()
+    {
+        var all = new List<object>();
+        using (MySqlConnection con = new MySqlConnection(connect))
+        {
+            con.Open();
+            using (MySqlCommand cmd = new MySqlCommand(
+                @"SELECT Municipality, PartyName, WardSeatsWon, PRSeatsAwarded, FinalSeats
+                  FROM MunicipalitySeatAllocation", con))
+            {
+                using (MySqlDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        all.Add(new
+                        {
+                            municipality = dr["Municipality"].ToString(),
+                            party = dr["PartyName"].ToString(),
+                            wardSeats = dr["WardSeatsWon"] is DBNull ? 0 : Convert.ToInt32(dr["WardSeatsWon"]),
+                            prSeats = dr["PRSeatsAwarded"] is DBNull ? 0 : Convert.ToInt32(dr["PRSeatsAwarded"]),
+                            totalSeats = dr["FinalSeats"] is DBNull ? 0 : Convert.ToInt32(dr["FinalSeats"]),
+                        });
+                    }
+                }
+            }
+        }
+        return Ok(all);
+    }
+
     //OUR OWN ELECTION-DAY SLIP CAPTURES (PR ballot), same municipality scope as
     //getIecPr above, so the LGE Results Report can compare what our slips said
     //to what the IEC's official count says.
